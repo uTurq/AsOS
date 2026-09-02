@@ -135,7 +135,12 @@ Core Service (asos.service.core.CoreService)
                                                        periodic/automatic polling — currently a manual
                                                        `asos canvas sync` invocation only]
   - Content ingestion pipeline                      [not yet built]
-  - Authority/conflict resolution engine             [not yet built]
+  - Authority/conflict resolution engine             [implemented as a
+                                                       standalone module (asos.facts.authority) + CLI
+                                                       commands (`asos facts conflicts`/`resolve`);
+                                                       NOT yet consulted automatically by Canvas sync
+                                                       or document ingestion — those milestones need to
+                                                       call record_fact() themselves when built]
   - Mastery engine (derived scoring over the ledger) [not yet built]
   - Assessment/preparedness engine                   [not yet built]
   - Task state tracker                               [schema only]
@@ -231,9 +236,16 @@ manual check the user has confirmed.
 5. A study guide can be linked to an assessment and its chunks become
    retrievable when querying preparedness for that assessment.
 6. Two conflicting facts about the same subject produce a surfaced
-   conflict, not a silently chosen value.
+   conflict, not a silently chosen value. **[Verified — a mixed-signal
+   case (higher authority but staler vs. lower authority but fresher)
+   correctly surfaces via `resolve_fact`/`find_all_conflicts`, and a
+   clear-dominance case correctly auto-resolves instead.]**
 7. Once resolved via voice/text, the resolution is stored as a
-   high-authority fact and does not resurface.
+   high-authority fact and does not resurface. **[Verified via text
+   (`asos facts resolve`); voice path doesn't exist yet, but shares the
+   same underlying `resolve_conflict_with_user_statement()` call per
+   architectural principle 1/8, so it inherits this once voice-lite is
+   built.]**
 8. An assessment with linked concepts returns a preparedness breakdown
    (strong/weak/no-evidence), never a fabricated single aggregate with
    no explanation available.
@@ -257,7 +269,40 @@ manual check the user has confirmed.
 
 ## 8. Implementation progress
 
-### Done (this session — Canvas sync milestone)
+### Done (this session — fact authority / conflict-resolution milestone)
+- `asos/facts/authority.py`: the authority engine implementing the
+  locked design — a fact only auto-wins over a competitor if it's at
+  least as strong on ALL THREE axes (source authority weight,
+  explicitness, recency); mixed signals are surfaced as a genuine
+  conflict rather than resolved via a single blended score. Verified
+  against both worked examples from the design conversation: a recent
+  explicit professor announcement correctly outranks a stale
+  auto-generated Canvas calendar entry (auto-resolves); a syllabus
+  date vs. a more-recently-synced but less-explicit Canvas calendar
+  date correctly surfaces as unresolved (neither dominates).
+- `resolve_fact()` also persists the `conflict_status` annotation onto
+  the underlying `Fact` rows (bookkeeping only — never touches
+  subject/value/source/verified_at) so other code can query "what's
+  unresolved" without recomputing.
+- `resolve_conflict_with_user_statement()`: the user's own correction
+  becomes a new `USER_STATED` fact, and every previously-current fact
+  for that subject is marked superseded + resolved — never deleted,
+  but excluded from future candidate sets, so a resolved conflict
+  never resurfaces (verified — acceptance criterion 7).
+- `find_all_conflicts()`: scans every (course, subject) pair for
+  unresolved conflicts — this is what a future briefing/notification
+  pass will call.
+- `seed_default_sources()`: idempotently seeds the `sources` reference
+  table with default authority weights; wired into both `CoreService`
+  startup and `asos init-db`, so a fresh DB is always immediately
+  usable without a manual seeding step.
+- `asos facts conflicts` / `asos facts resolve <subject> <value>` CLI
+  commands — verified end-to-end against a real (non-mocked) SQLite DB,
+  not just the test suite: surfaced a real conflict, resolved it via
+  the CLI, confirmed it stopped appearing afterward.
+- 54 automated tests passing (was 44 after the Canvas sync milestone).
+
+### Done (previous session — Canvas sync milestone)
 - `CanvasClient` (`asos/canvas/client.py`): thin, paginated Canvas REST
   API v1 wrapper (`get_active_courses`, `get_assignments`,
   `get_calendar_events`), HTTP transport injectable for testing, token
@@ -331,6 +376,13 @@ manual check the user has confirmed.
 - Periodic/scheduled Canvas polling (the sync worker currently runs
   once per invocation; wiring it into `CoreService`'s loop on an
   interval is a natural next step, not yet done).
+- Wiring Canvas sync / document ingestion to actually call
+  `record_fact()` — the authority engine exists and is tested in
+  isolation, but nothing populates `facts` from real Canvas/syllabus
+  data yet. That naturally happens as part of the document-ingestion
+  milestone (syllabus extraction) and, likely, a small addition to
+  Canvas sync (e.g. recording assignment due dates as facts too, so
+  they can participate in conflict resolution against syllabus dates).
 - Claude API integration
 - Document ingestion / embeddings / vector index
 - Voice pipeline (hotkey capture, STT, TTS)
@@ -370,6 +422,9 @@ manual check the user has confirmed.
 | All datetimes stored and compared as naive UTC (no `DateTime(timezone=True)`) | Caught during Canvas-sync development: SQLite doesn't actually preserve tzinfo — a `DateTime(timezone=True)` column looks timezone-aware only while the object stays in SQLAlchemy's in-memory identity map, and silently comes back naive on any reload (service restart, cache eviction, garbage collection). A naive/aware comparison never raises, it just silently evaluates unequal — which would have made the sync worker flag every synced date as "changed" after any restart. Being explicitly naive-UTC everywhere (via `asos.db.base._now()`) removes the trap instead of hiding it behind a flag that doesn't do what it implies on this backend. A regression test (`test_due_at_survives_identity_map_eviction_and_reload`) forces eviction explicitly so this can't silently regress. |
 | `sync_change_log` kept separate from `facts` | Both are "history of what changed," but for different reasons: `sync_change_log` is an internal Canvas-poll audit trail (did anything change since last check, what was it before) with no authority weighting. `facts` is the cross-source, authority-weighted provenance model for the conflict-resolution engine (a separate, not-yet-built milestone). Conflating them would mean every Canvas field sync has to reason about source authority before it's needed, and would make the authority engine's job ambiguous about which history it owns. |
 | Canvas entities that disappear from a poll are not deleted locally | A course/assignment vanishing from Canvas's "active" filter is often a term boundary or a temporary Canvas-side hiccup, not something the user wants silently destroyed along with any local task/mastery data linked to it. The `SyncChangeType.DELETED` enum value is reserved for this, but detecting and logging disappearances is NOT yet implemented — the current sync worker simply leaves untouched anything Canvas stops returning. Actual pruning should remain an explicit user action, not automatic, whenever this is built. |
+| Fact authority resolved by 3-axis dominance, not a single blended score | A blended score (e.g. weighted sum of authority+explicitness+recency) would hide *why* a fact won and could pick something that's only "better on average" while being staler or less explicit than the alternative — the opposite of the transparency the design explicitly called for. Requiring dominance on all three axes independently means a fact only auto-wins when it's unambiguously better, and any genuine trade-off (higher authority but staler vs. lower authority but fresher) correctly surfaces as a conflict instead of being guessed at. |
+| Fact conflict resolution never deletes or edits existing facts | Resolving a conflict (`resolve_conflict_with_user_statement`) creates a new fact and marks previous ones `superseded_by_fact_id` + `conflict_status=RESOLVED`, rather than overwriting them. Mirrors the same append-only-history principle used for `mastery_events` — "why did it used to think X" stays answerable. |
+| `seed_default_sources()` is a Python function called on startup, not an Alembic data migration | Keeps the default authority weights in exactly one place (avoiding a second copy embedded in a migration file that could silently drift from the code), and is trivially idempotent. Standard Alembic guidance is that data migrations should be self-contained with literal values rather than importing application code (since the app's models can change after a migration is written) — but for a single-user app, the duplication risk of hand-copying the weight table into a migration outweighed that purity concern here. |
 
 ---
 

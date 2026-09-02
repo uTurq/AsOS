@@ -20,6 +20,7 @@ from asos.config import get_database_url
 from asos.credentials import CredentialVault
 from asos.db.base import Base, make_engine, make_session_factory
 from asos.db import models  # noqa: F401  (registers tables on Base.metadata)
+from asos.facts.authority import seed_default_sources
 from asos.service.health import write_heartbeat
 
 logger = logging.getLogger("asos.service")
@@ -41,6 +42,9 @@ class CoreService:
         self.engine = make_engine(get_database_url())
         Base.metadata.create_all(self.engine)  # safety net; Alembic is the source of truth for schema evolution
         self.session_factory = make_session_factory(self.engine)
+
+        with self.session_factory() as session:
+            seed_default_sources(session)
 
     def request_stop(self) -> None:
         logger.info("stop requested")

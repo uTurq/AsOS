@@ -29,8 +29,10 @@ from asos.service.health import is_healthy
 app = typer.Typer(help="AsOS — Assist Operating System")
 creds_app = typer.Typer(help="Manage locally-stored credentials (Canvas token, Anthropic API key, ...).")
 canvas_app = typer.Typer(help="Canvas sync commands.")
+facts_app = typer.Typer(help="Query and resolve fact conflicts.")
 app.add_typer(creds_app, name="creds")
 app.add_typer(canvas_app, name="canvas")
+app.add_typer(facts_app, name="facts")
 
 logger = logging.getLogger("asos.cli")
 
@@ -45,13 +47,23 @@ def paths() -> None:
 
 @app.command("init-db")
 def init_db() -> None:
-    """Apply all pending Alembic migrations to bring the local DB up to date."""
+    """Apply all pending Alembic migrations and seed reference data
+    (e.g. default source-authority weights)."""
     import subprocess
     from pathlib import Path
 
     project_root = Path(__file__).resolve().parent.parent.parent
     result = subprocess.run([sys.executable, "-m", "alembic", "upgrade", "head"], cwd=project_root)
-    raise typer.Exit(result.returncode)
+    if result.returncode != 0:
+        raise typer.Exit(result.returncode)
+
+    from asos.db.base import make_engine, make_session_factory
+    from asos.facts.authority import seed_default_sources
+
+    engine = make_engine(get_database_url())
+    with make_session_factory(engine)() as session:
+        seed_default_sources(session)
+    engine.dispose()
 
 
 @app.command()
@@ -167,6 +179,48 @@ def canvas_sync() -> None:
         f"{summary['calendar_events']} calendar event(s). "
         f"{summary['changes_detected']} change(s) detected this run."
     )
+
+
+@facts_app.command("conflicts")
+def facts_conflicts(course_id: int = typer.Option(None, help="Limit to one course's DB id.")) -> None:
+    """List every subject with an unresolved, genuinely conflicting set
+    of facts (e.g. syllabus vs. Canvas disagreeing on an exam date)."""
+    from asos.db.base import make_engine, make_session_factory
+    from asos.facts.authority import find_all_conflicts
+
+    engine = make_engine(get_database_url())
+    with make_session_factory(engine)() as session:
+        conflicts = find_all_conflicts(session, course_id=course_id)
+        if not conflicts:
+            typer.echo("No unresolved fact conflicts.")
+            return
+        for resolution in conflicts:
+            typer.echo(f"Subject: {resolution.subject} (course_id={resolution.course_id})")
+            for fact in resolution.conflicting:
+                typer.echo(
+                    f"  - '{fact.value}'  [source={fact.source.type.value}, "
+                    f"explicitness={fact.explicitness.value}, verified_at={fact.verified_at}]"
+                )
+    engine.dispose()
+
+
+@facts_app.command("resolve")
+def facts_resolve(
+    subject: str = typer.Argument(..., help="Exact subject text, as shown by `asos facts conflicts`."),
+    value: str = typer.Argument(..., help="The correct value, as the user states it."),
+    course_id: int = typer.Option(None, help="Limit to one course's DB id."),
+) -> None:
+    """Settle a conflict by stating the correct value yourself. Recorded
+    as a new, high-authority fact — the old conflicting facts are kept
+    for history but stop being considered current."""
+    from asos.db.base import make_engine, make_session_factory
+    from asos.facts.authority import resolve_conflict_with_user_statement
+
+    engine = make_engine(get_database_url())
+    with make_session_factory(engine)() as session:
+        fact = resolve_conflict_with_user_statement(session, course_id=course_id, subject=subject, value=value)
+        typer.echo(f"Recorded '{subject}' = '{value}' (fact id {fact.id}). Future conflicts on this subject won't resurface this.")
+    engine.dispose()
 
 
 if __name__ == "__main__":
