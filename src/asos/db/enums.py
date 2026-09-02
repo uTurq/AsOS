@@ -97,3 +97,15 @@ class NotificationSeverity(str, enum.Enum):
     CRITICAL = "critical"
     NOTABLE = "notable"
     AMBIENT = "ambient"
+
+
+class SyncEntityType(str, enum.Enum):
+    COURSE = "course"
+    ASSIGNMENT = "assignment"
+    CALENDAR_EVENT = "calendar_event"
+
+
+class SyncChangeType(str, enum.Enum):
+    CREATED = "created"
+    UPDATED = "updated"
+    DELETED = "deleted"

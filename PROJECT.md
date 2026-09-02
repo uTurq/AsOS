@@ -130,7 +130,10 @@ Interaction Layer (not yet built beyond the CLI)
 Core Service (asos.service.core.CoreService)
   - Lifecycle: start / request_stop / run_forever   [implemented]
   - Heartbeat-based health check                    [implemented]
-  - Canvas sync worker                              [not yet built]
+  - Canvas sync worker                              [implemented as a standalone module + CLI command;
+                                                       NOT yet wired into CoreService's own loop for
+                                                       periodic/automatic polling — currently a manual
+                                                       `asos canvas sync` invocation only]
   - Content ingestion pipeline                      [not yet built]
   - Authority/conflict resolution engine             [not yet built]
   - Mastery engine (derived scoring over the ledger) [not yet built]
@@ -210,10 +213,18 @@ for the Windows-only pieces this sandbox can't verify, an explicit
 manual check the user has confirmed.
 
 1. Fresh Canvas sync pulls all active courses/assignments/calendar
-   events into local DB on first run.
+   events into local DB on first run. **[Verified against mocked Canvas
+   API responses; NOT yet verified against a real Canvas account —
+   this sandbox cannot reach Canvas's network. Needs a real-world check
+   once credentials are set on the target machine.]**
 2. Re-sync after a Canvas-side change produces a diff event, not a
-   silent overwrite — old value retained in history.
+   silent overwrite — old value retained in history. **[Verified,
+   including a dedicated regression test for a datetime-reload edge
+   case found during development.]**
 3. Credentials never appear in any log file or Claude API payload.
+   **[Verified for the credential vault and the Canvas client
+   specifically — token is sent only via the Authorization header and
+   confirmed absent from exception messages.]**
 4. Dropping a syllabus PDF into the watched folder yields chunks in the
    vector index plus provenance-tagged facts for exam dates, grading
    breakdown, and late policy (where present).
@@ -246,7 +257,38 @@ manual check the user has confirmed.
 
 ## 8. Implementation progress
 
-### Done (this session — foundation milestone)
+### Done (this session — Canvas sync milestone)
+- `CanvasClient` (`asos/canvas/client.py`): thin, paginated Canvas REST
+  API v1 wrapper (`get_active_courses`, `get_assignments`,
+  `get_calendar_events`), HTTP transport injectable for testing, token
+  sent only via `Authorization` header, never logged or included in
+  exception messages. Followed real Canvas pagination (`Link: rel=next`
+  headers) correctly under test.
+- `CanvasSyncWorker` (`asos/canvas/sync.py`): pulls courses/assignments/
+  calendar events and reconciles against local DB — inserts new
+  entities, diffs known ones field-by-field, and records every change
+  in the new `sync_change_log` table (old value retained, never
+  silently overwritten — satisfies acceptance criteria 1 and 2).
+  Verified: initial sync creates rows; re-sync with no Canvas-side
+  change produces zero new diff entries; re-sync with a moved due date
+  produces exactly one diff entry with the old date preserved; a
+  Canvas-side status change (e.g. assignment graded) never touches a
+  locally-tracked `Task`, confirming the Canvas/local-task independence
+  principle actually holds in the sync path, not just in the schema.
+- New `sync_change_log` table + migration, kept deliberately separate
+  from the `facts` provenance model (see decision table below).
+- `asos canvas sync` CLI command; fails with a clear, actionable
+  message (not a crash) when Canvas credentials aren't set yet.
+- **Bug caught and fixed during this milestone** (see decision log):
+  SQLite silently returns naive datetimes on reload even for
+  `DateTime(timezone=True)` columns, which would have caused false
+  "changed" diffs after any process restart. Fixed by standardizing on
+  naive-UTC datetimes everywhere via a shared `asos.db.base._now()`
+  helper; added a regression test that explicitly forces identity-map
+  eviction to catch any recurrence.
+- 44 automated tests passing (was 32 after the foundation milestone).
+
+### Done (previous session — foundation milestone)
 - Environment inspected: target is Windows, CPU-only, no GPU (user-
   confirmed; the coding sandbox itself is an unrelated ephemeral Linux
   container — see Section 2).
@@ -274,8 +316,21 @@ manual check the user has confirmed.
   Alembic upgrade/downgrade via subprocess, heartbeat/health logic,
   service lifecycle, and CLI smoke tests.
 
-### Explicitly not started yet (per user instruction for this milestone)
-- Canvas API integration
+### Explicitly not started yet
+- **Live Canvas verification.** This sandbox's network egress is
+  restricted to package registries (PyPI, npm, GitHub, etc.) and
+  cannot reach any Canvas instance. `CanvasClient`/`CanvasSyncWorker`
+  are thoroughly unit-tested against realistic mocked Canvas API
+  responses, but a real end-to-end sync against an actual Canvas
+  account has NOT been verified and needs to happen on the user's own
+  machine with real credentials (`asos creds set canvas_base_url` /
+  `asos creds set canvas_api_token`, then `asos canvas sync`).
+- Deleted/withdrawn Canvas entities are logged for visibility but not
+  pruned locally — see the decision table for reasoning; revisit if
+  this proves wrong in practice.
+- Periodic/scheduled Canvas polling (the sync worker currently runs
+  once per invocation; wiring it into `CoreService`'s loop on an
+  interval is a natural next step, not yet done).
 - Claude API integration
 - Document ingestion / embeddings / vector index
 - Voice pipeline (hotkey capture, STT, TTS)
@@ -312,6 +367,9 @@ manual check the user has confirmed.
 | Heartbeat-file health check instead of process polling | Trivially cross-platform (a JSON file with a timestamp/PID/status), no OS-specific process-inspection code needed for a "is it alive" check. |
 | Typer for the CLI | Small, ergonomic, keeps the debugging/admin surface permanently available per the architectural principle that voice never replaces text access. |
 | Single-process, threaded (not async) core service | No concrete concurrency need yet justifies asyncio or multiprocessing. Revisit only when a real worker (e.g. STT capture running alongside a Canvas poll) demonstrates contention under the current model. |
+| All datetimes stored and compared as naive UTC (no `DateTime(timezone=True)`) | Caught during Canvas-sync development: SQLite doesn't actually preserve tzinfo — a `DateTime(timezone=True)` column looks timezone-aware only while the object stays in SQLAlchemy's in-memory identity map, and silently comes back naive on any reload (service restart, cache eviction, garbage collection). A naive/aware comparison never raises, it just silently evaluates unequal — which would have made the sync worker flag every synced date as "changed" after any restart. Being explicitly naive-UTC everywhere (via `asos.db.base._now()`) removes the trap instead of hiding it behind a flag that doesn't do what it implies on this backend. A regression test (`test_due_at_survives_identity_map_eviction_and_reload`) forces eviction explicitly so this can't silently regress. |
+| `sync_change_log` kept separate from `facts` | Both are "history of what changed," but for different reasons: `sync_change_log` is an internal Canvas-poll audit trail (did anything change since last check, what was it before) with no authority weighting. `facts` is the cross-source, authority-weighted provenance model for the conflict-resolution engine (a separate, not-yet-built milestone). Conflating them would mean every Canvas field sync has to reason about source authority before it's needed, and would make the authority engine's job ambiguous about which history it owns. |
+| Canvas entities that disappear from a poll are not deleted locally | A course/assignment vanishing from Canvas's "active" filter is often a term boundary or a temporary Canvas-side hiccup, not something the user wants silently destroyed along with any local task/mastery data linked to it. The `SyncChangeType.DELETED` enum value is reserved for this, but detecting and logging disappearances is NOT yet implemented — the current sync worker simply leaves untouched anything Canvas stops returning. Actual pruning should remain an explicit user action, not automatic, whenever this is built. |
 
 ---
 

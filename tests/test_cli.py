@@ -38,3 +38,9 @@ def test_creds_check_reports_not_set(isolated_data_dir):
     result = runner.invoke(app, ["creds", "check", "canvas_api_token"])
     assert result.exit_code == 0
     assert "not set" in result.stdout
+
+
+def test_canvas_sync_without_credentials_fails_clearly(isolated_data_dir):
+    result = runner.invoke(app, ["canvas", "sync"])
+    assert result.exit_code == 1
+    assert "not fully set" in result.stdout

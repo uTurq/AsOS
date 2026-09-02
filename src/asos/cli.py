@@ -13,7 +13,7 @@ import sys
 
 import typer
 
-from asos.config import get_data_dir, get_database_path, get_log_dir
+from asos.config import get_data_dir, get_database_path, get_database_url, get_log_dir
 from asos.credentials import (
     ANTHROPIC_API_KEY,
     CANVAS_API_TOKEN,
@@ -28,7 +28,9 @@ from asos.service.health import is_healthy
 
 app = typer.Typer(help="AsOS — Assist Operating System")
 creds_app = typer.Typer(help="Manage locally-stored credentials (Canvas token, Anthropic API key, ...).")
+canvas_app = typer.Typer(help="Canvas sync commands.")
 app.add_typer(creds_app, name="creds")
+app.add_typer(canvas_app, name="canvas")
 
 logger = logging.getLogger("asos.cli")
 
@@ -123,6 +125,48 @@ def creds_delete(name: str) -> None:
     vault = _friendly_vault_or_exit()
     vault.delete_credential(name)
     typer.echo(f"Deleted '{name}' (if it existed).")
+
+
+@canvas_app.command("sync")
+def canvas_sync() -> None:
+    """Run one Canvas sync pass (courses, assignments, calendar events)
+    and print a summary. Requires canvas_base_url and canvas_api_token
+    to already be set via `asos creds set`."""
+    from asos.canvas.client import CanvasAPIError, CanvasClient
+    from asos.canvas.sync import CanvasSyncWorker
+    from asos.db.base import Base, make_engine, make_session_factory
+    from asos.db import models  # noqa: F401
+
+    vault = _friendly_vault_or_exit()
+    base_url = vault.get_credential_or_none(CANVAS_BASE_URL)
+    token = vault.get_credential_or_none(CANVAS_API_TOKEN)
+    if not base_url or not token:
+        typer.echo(
+            "Canvas credentials are not fully set. Run:\n"
+            f"  asos creds set {CANVAS_BASE_URL}\n"
+            f"  asos creds set {CANVAS_API_TOKEN}"
+        )
+        raise typer.Exit(1)
+
+    engine = make_engine(get_database_url())
+    Base.metadata.create_all(engine)
+    session_factory = make_session_factory(engine)
+
+    client = CanvasClient(base_url, token)
+    worker = CanvasSyncWorker(client)
+
+    try:
+        with session_factory() as session:
+            summary = worker.sync_all(session)
+    except CanvasAPIError as exc:
+        typer.echo(f"Canvas sync failed: {exc}")
+        raise typer.Exit(1)
+
+    typer.echo(
+        f"Synced {summary['courses']} course(s), {summary['assignments']} assignment(s), "
+        f"{summary['calendar_events']} calendar event(s). "
+        f"{summary['changes_detected']} change(s) detected this run."
+    )
 
 
 if __name__ == "__main__":

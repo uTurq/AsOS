@@ -62,6 +62,7 @@ def test_upgrade_creates_all_expected_tables(isolated_data_dir):
         "study_sessions",
         "study_session_concepts",
         "episodic_notes",
+        "sync_change_log",
         "alembic_version",
     }
     assert expected.issubset(tables)

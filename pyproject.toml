@@ -9,6 +9,7 @@ dependencies = [
     "keyring>=25.0",
     "platformdirs>=4.0",
     "typer>=0.12",
+    "requests>=2.31",
 ]
 
 [project.optional-dependencies]
