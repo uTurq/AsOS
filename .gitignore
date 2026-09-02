@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual env
+.venv/
+venv/
+
+# Local data (databases, logs, ingested documents, heartbeat files)
+data/*.db
+data/*.db-journal
+data/*.log
+data/heartbeat.json
+!data/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
