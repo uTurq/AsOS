@@ -31,10 +31,12 @@ creds_app = typer.Typer(help="Manage locally-stored credentials (Canvas token, A
 canvas_app = typer.Typer(help="Canvas sync commands.")
 facts_app = typer.Typer(help="Query and resolve fact conflicts.")
 docs_app = typer.Typer(help="Document ingestion (syllabi, lecture notes, study guides) and search.")
+study_app = typer.Typer(help="Concepts, mastery, assessments, and preparedness.")
 app.add_typer(creds_app, name="creds")
 app.add_typer(canvas_app, name="canvas")
 app.add_typer(facts_app, name="facts")
 app.add_typer(docs_app, name="docs")
+app.add_typer(study_app, name="study")
 
 logger = logging.getLogger("asos.cli")
 
@@ -341,6 +343,114 @@ def docs_extract_facts(document_id: int = typer.Argument(...)) -> None:
         typer.echo(f"Extracted {len(facts)} fact(s):")
         for f in facts:
             typer.echo(f"  - {f.subject}: {f.value}")
+    engine.dispose()
+
+
+@study_app.command("add-concept")
+def study_add_concept(course_id: int, name: str) -> None:
+    """Create a concept under a course."""
+    from asos.db.base import make_engine, make_session_factory
+    from asos.db.models import Concept
+
+    engine = make_engine(get_database_url())
+    with make_session_factory(engine)() as session:
+        concept = Concept(course_id=course_id, name=name)
+        session.add(concept)
+        session.commit()
+        typer.echo(f"Created concept '{name}' (id {concept.id}).")
+    engine.dispose()
+
+
+@study_app.command("record")
+def study_record(
+    concept_id: int,
+    outcome: str = typer.Argument(..., help="One of: correct, incorrect, partial, self_rated"),
+    self_rating: int = typer.Option(None, help="1-5, required when outcome=self_rated"),
+    notes: str = typer.Option(None),
+) -> None:
+    """Record one piece of mastery evidence for a concept (e.g. a quiz
+    answer or a self-assessment)."""
+    from asos.db.base import make_engine, make_session_factory
+    from asos.db.enums import MasteryEventType, MasteryOutcome
+    from asos.mastery.events import record_mastery_event
+
+    try:
+        outcome_enum = MasteryOutcome(outcome)
+    except ValueError:
+        typer.echo(f"Unknown outcome '{outcome}'. Must be one of: {', '.join(o.value for o in MasteryOutcome)}")
+        raise typer.Exit(1)
+
+    engine = make_engine(get_database_url())
+    with make_session_factory(engine)() as session:
+        try:
+            event = record_mastery_event(
+                session,
+                concept_id=concept_id,
+                event_type=MasteryEventType.SELF_REPORT if outcome_enum == MasteryOutcome.SELF_RATED else MasteryEventType.QUIZ_ANSWER,
+                outcome=outcome_enum,
+                self_rating=self_rating,
+                notes=notes,
+            )
+        except ValueError as exc:
+            typer.echo(str(exc))
+            raise typer.Exit(1)
+        typer.echo(f"Recorded {outcome} for concept {concept_id} (event id {event.id}, score {event.outcome_score:.2f}).")
+    engine.dispose()
+
+
+@study_app.command("mastery")
+def study_mastery(concept_id: int) -> None:
+    """Show the current derived mastery level for a concept, with the
+    underlying evidence (why it thinks what it thinks)."""
+    from asos.db.base import make_engine, make_session_factory
+    from asos.mastery.scoring import compute_concept_mastery
+
+    engine = make_engine(get_database_url())
+    with make_session_factory(engine)() as session:
+        result = compute_concept_mastery(session, concept_id)
+        score_str = f"{result.score:.2f}" if result.score is not None else "n/a"
+        typer.echo(f"Level: {result.level.value}  Score: {score_str}  Events: {result.event_count}")
+        for e in result.events:
+            note = f" — {e.notes}" if e.notes else ""
+            typer.echo(f"  - {e.occurred_at}: {e.outcome.value} ({e.event_type.value}){note}")
+    engine.dispose()
+
+
+@study_app.command("link-concept")
+def study_link_concept(assessment_id: int, concept_id: int, importance: int = typer.Option(None)) -> None:
+    """Link a concept to an assessment (optionally weighted 1-5)."""
+    from asos.db.base import make_engine, make_session_factory
+    from asos.assessments.linking import link_concept
+
+    engine = make_engine(get_database_url())
+    with make_session_factory(engine)() as session:
+        link_concept(session, assessment_id=assessment_id, concept_id=concept_id, importance=importance)
+        typer.echo(f"Linked concept {concept_id} to assessment {assessment_id}.")
+    engine.dispose()
+
+
+@study_app.command("preparedness")
+def study_preparedness(assessment_id: int) -> None:
+    """How prepared am I for this assessment? Explainable breakdown,
+    never a single fabricated number."""
+    from asos.db.base import make_engine, make_session_factory
+    from asos.assessments.preparedness import compute_assessment_preparedness
+
+    engine = make_engine(get_database_url())
+    with make_session_factory(engine)() as session:
+        try:
+            prep = compute_assessment_preparedness(session, assessment_id)
+        except LookupError as exc:
+            typer.echo(str(exc))
+            raise typer.Exit(1)
+
+        typer.echo(f"Preparedness for '{prep.assessment.name}':")
+        overall = f"{prep.overall_score:.0%}" if prep.overall_score is not None else "n/a (nothing studied yet)"
+        typer.echo(f"  Overall (of studied material): {overall}")
+        typer.echo(f"  Coverage: {prep.coverage:.0%} of the assessment has been studied at all")
+        for label, bucket in [("Strong", prep.strong), ("Developing", prep.developing), ("Weak", prep.weak), ("No evidence yet", prep.no_evidence)]:
+            if bucket:
+                typer.echo(f"  {label}: {', '.join(c.concept.name for c in bucket)}")
     engine.dispose()
 
 

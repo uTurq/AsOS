@@ -145,8 +145,14 @@ Core Service (asos.service.core.CoreService)
                                                        commands (`asos facts conflicts`/`resolve`);
                                                        now fed real data by syllabus extraction, but
                                                        Canvas sync still doesn't write to `facts`]
-  - Mastery engine (derived scoring over the ledger) [not yet built]
-  - Assessment/preparedness engine                   [not yet built]
+  - Mastery engine (derived scoring over the ledger) [implemented: asos.mastery.events +
+                                                       asos.mastery.scoring; CLI commands
+                                                       (`asos study record`/`mastery`)]
+  - Assessment/preparedness engine                   [implemented: asos.assessments.linking +
+                                                       asos.assessments.preparedness; CLI command
+                                                       (`asos study preparedness`); verified against
+                                                       the exact worked example from the original
+                                                       design conversation]
   - Task state tracker                               [schema only]
   - Notification severity engine                     [schema only]
   - Claude API client                                [not yet built]
@@ -264,15 +270,22 @@ manual check the user has confirmed.
    built.]**
 8. An assessment with linked concepts returns a preparedness breakdown
    (strong/weak/no-evidence), never a fabricated single aggregate with
-   no explanation available.
+   no explanation available. **[Verified — including the exact worked
+   example from the design conversation, both in the test suite and
+   manually through the real CLI.]**
 9. "Why am I weak on X" surfaces actual underlying mastery events, not
-   just a restated score.
+   just a restated score. **[Verified — `asos study mastery` prints the
+   raw events including notes, e.g. "mixed up numerator and
+   denominator", not just a number.]**
 10. A task with no Canvas counterpart can be created, updated through
     all five states, and persists independent of any Canvas assignment.
 11. Marking a Canvas-linked task `done` locally doesn't alter/require a
     Canvas submission, and vice versa.
 12. Mastery events accumulate (never overwritten); derived score
-    changes appropriately with new evidence.
+    changes appropriately with new evidence. **[Verified — including a
+    dedicated test confirming a recent miss visibly lowers the score
+    even after a run of correct answers, and that stale-but-perfect
+    history alone does NOT register as confidently "strong."]**
 13. Notification severity classification + delivery bundling/rate
     limiting/quiet hours all behave per the severity engine's rules.
 14. Voice-lite hotkey → STT → core → TTS works end-to-end for a
@@ -285,7 +298,55 @@ manual check the user has confirmed.
 
 ## 8. Implementation progress
 
-### Done (this session — document ingestion / embeddings / Claude extraction milestone)
+### Done (this session — mastery scoring + assessment preparedness milestone)
+- **Reordered from the original roadmap deliberately**: step 6
+  (mastery event logging + derived scoring) was pulled forward ahead of
+  its planned position, because step 5 (preparedness) is meaningless
+  without a real scoring function — building it against a stub would
+  have meant redoing it immediately after. `asos/mastery/events.py` +
+  `asos/mastery/scoring.py` are effectively both steps 5 and 6's
+  foundational piece, done together, tested first in isolation with
+  synthetic event sequences exactly as the original roadmap intended
+  for step 6 specifically.
+- `asos/mastery/scoring.py`: `compute_concept_mastery()` — recency-
+  weighted average of mastery_events, shrunk toward a neutral 0.5
+  prior in proportion to how little/stale the evidence is (standard
+  Bayesian-average smoothing with a prior pseudo-count). A concept
+  with zero events is a distinct NO_EVIDENCE state, never a guessed
+  0 or 0.5. Categorized into STRONG/DEVELOPING/WEAK/NO_EVIDENCE.
+  **A real behavior was discovered, not assumed, via a failing test**:
+  five perfect answers all 60+ days old do NOT register as confidently
+  "strong" — they decay toward the neutral prior since nothing recent
+  confirms the knowledge is still there. This was initially a wrong
+  test expectation on my part, caught immediately by running it, and
+  turned into a dedicated regression test once confirmed as correct,
+  intentional behavior rather than a bug.
+- `asos/mastery/events.py`: `record_mastery_event()` — append-only,
+  sensible outcome_score defaults (CORRECT=1.0/INCORRECT=0.0/
+  PARTIAL=0.5, SELF_RATED maps a 1-5 rating to 0.0-1.0), explicit
+  override always available.
+- `asos/assessments/linking.py`: idempotent `link_concept()` /
+  `link_document()` — calling twice updates rather than duplicates.
+- `asos/assessments/preparedness.py`: `compute_assessment_preparedness()`
+  — buckets linked concepts into strong/developing/weak/no-evidence;
+  `overall_score` is importance-weighted but excludes no-evidence
+  concepts entirely (never fabricates a 0 for "never studied");
+  `coverage` separately reports what fraction of the assessment (by
+  importance) has been studied at all, specifically so a high score on
+  a small studied slice isn't mistaken for full readiness. **Verified
+  against the exact worked example from the original design
+  conversation** (buffers/titration curves strong, Henderson-
+  Hasselbalch weak with 2 recent misses, acid-base edge cases no
+  evidence) — both in the test suite and again manually through the
+  real CLI end-to-end.
+- CLI: `asos study add-concept/record/mastery/link-concept/preparedness`
+  — the mastery-and-preparedness smoke test above was run through the
+  actual installed `asos` binary against a real SQLite DB, not just
+  pytest.
+- 108 automated tests passing (was 90 after the document-ingestion
+  milestone).
+
+### Done (previous session — document ingestion / embeddings / Claude extraction milestone)
 - `asos/documents/parsing.py`: extracts text from PDF (per-page),
   DOCX (paragraph groups), PPTX (per-slide), and plain text/Markdown.
   Verified against real generated fixture files for every format, not
@@ -462,7 +523,19 @@ manual check the user has confirmed.
   `docs ingest` is a manual CLI command for now.
 - Manually confirming assessment-to-concept/document links from
   ingested study guides (the schema and `get_documents_for_assessment`
-  helper exist; nothing yet proposes or confirms these links).
+  helper exist; nothing yet proposes these links automatically — you
+  can create them via `asos study link-concept`, but nothing reads a
+  study guide and suggests which concepts it covers).
+- Local task tracking CLI/wiring (schema exists and is tested at the
+  model level; no `asos task` commands yet — that's the next roadmap
+  step).
+- Notification severity engine.
+- Wiring any of this (mastery, preparedness, facts, Canvas) into an
+  actual daily-briefing or "what should I study" recommendation flow —
+  every piece so far is queryable individually via CLI, but nothing
+  synthesizes them into the proactive experience described in the
+  original vision yet. That's implicitly the text/CLI-interface
+  milestone (step 9) and beyond.
 - Document ingestion / embeddings / vector index
 - Voice pipeline (hotkey capture, STT, TTS)
 - Autostart registration (Windows Task Scheduler / Startup folder)
@@ -511,6 +584,9 @@ manual check the user has confirmed.
 | Document ingestion copies the source file into AsOS's own data directory rather than referencing it in place | The original file (e.g. a Canvas download in the user's Downloads folder) is outside AsOS's control and could be moved, renamed, or deleted at any time. Copying once at ingest time means AsOS's record of a document never silently breaks because of something the user did elsewhere. |
 | Syllabus-extracted facts get MEDIUM confidence by default, not HIGH, despite `explicitness=EXPLICIT_STATEMENT` | `explicitness` describes the *source document* (the syllabus states this directly, it isn't inferred from context) — but the *extraction mechanism* is still an LLM parse of that document, which can misread or hallucinate. Confidence is deliberately more conservative than a human directly transcribing the same sentence would warrant, so a wrong extraction doesn't inherit unwarranted trust just because the underlying sentence was unambiguous. |
 | Claude client (for extraction) and Canvas HTTP session both use the same injectable-protocol DI pattern | Consistency: the same pattern already proven for `keyring` (credentials) and `requests.Session` (Canvas) means every external-service boundary in this codebase is tested the same way — a fake implementing the same small interface — rather than each milestone inventing its own mocking approach. |
+| Mastery score = recency-weighted average shrunk toward a neutral prior (Bayesian-average smoothing), not a plain weighted average | A plain recency-weighted average, when normalized, is invariant to how old ALL the evidence is (the normalization cancels out a uniform age shift) — so five perfect answers from 60 days ago would look identical to five from yesterday. Adding a constant-weight neutral prior (0.5) means sparse or entirely-stale evidence gets pulled toward "not sure," while abundant recent evidence overwhelms the prior and the score reflects the real track record. This is what makes "we haven't confirmed this recently" show up in the number at all, not just in a separate staleness flag. |
+| `overall_score` (preparedness) excludes no-evidence concepts rather than scoring them as 0 | Scoring an unstudied concept as 0% mastered would fabricate a confidence level AsOS doesn't have — "never studied" and "studied and failing" are different facts, and conflating them would actively mislead someone into thinking they're doing worse than they are on material they simply haven't touched yet. `coverage` exists specifically to prevent the opposite failure mode (mistaking a high score on a small studied slice for full readiness). |
+| Mastery-scoring milestone (originally step 6) pulled forward ahead of preparedness (step 5) | Preparedness is only as honest as the score it's built on — building it against a stubbed/fake score first would have meant redoing the real logic immediately after anyway. The roadmap's dependency was already implicit ("depends on mastery events, stub with fake data initially"); building the real thing first was less total work than building a stub and then a replacement. |
 
 ---
 
