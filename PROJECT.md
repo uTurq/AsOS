@@ -134,13 +134,17 @@ Core Service (asos.service.core.CoreService)
                                                        NOT yet wired into CoreService's own loop for
                                                        periodic/automatic polling — currently a manual
                                                        `asos canvas sync` invocation only]
-  - Content ingestion pipeline                      [not yet built]
+  - Content ingestion pipeline                      [implemented as standalone modules
+                                                       (asos.documents.*) + CLI commands
+                                                       (`asos docs ingest`/`search`/`extract-facts`);
+                                                       uses a placeholder (non-semantic) embedding —
+                                                       see open decisions. NOT yet wired into a
+                                                       watched-folder auto-ingestion worker.]
   - Authority/conflict resolution engine             [implemented as a
                                                        standalone module (asos.facts.authority) + CLI
                                                        commands (`asos facts conflicts`/`resolve`);
-                                                       NOT yet consulted automatically by Canvas sync
-                                                       or document ingestion — those milestones need to
-                                                       call record_fact() themselves when built]
+                                                       now fed real data by syllabus extraction, but
+                                                       Canvas sync still doesn't write to `facts`]
   - Mastery engine (derived scoring over the ledger) [not yet built]
   - Assessment/preparedness engine                   [not yet built]
   - Task state tracker                               [schema only]
@@ -232,9 +236,21 @@ manual check the user has confirmed.
    confirmed absent from exception messages.]**
 4. Dropping a syllabus PDF into the watched folder yields chunks in the
    vector index plus provenance-tagged facts for exam dates, grading
-   breakdown, and late policy (where present).
+   breakdown, and late policy (where present). **[Partially verified:
+   `asos docs ingest` does the parse/chunk/embed/store part end-to-end
+   on real PDFs, and `extract_syllabus_facts` is fully tested against a
+   fake Claude client producing exactly these fact categories with
+   correct provenance. NOT yet verified: (a) a real Claude call doing
+   real extraction from real syllabus text — untested live, see above
+   — and (b) there's no watched-folder automation yet, ingestion is a
+   manual CLI command.]**
 5. A study guide can be linked to an assessment and its chunks become
    retrievable when querying preparedness for that assessment.
+   **[Retrieval scoped to a document-id set is implemented and tested
+   (`search_chunks(..., document_ids=[...])`,
+   `get_documents_for_assessment`); the actual UI/flow for confirming
+   which documents cover which assessment doesn't exist yet — that's
+   the assessment-linking milestone, next in the roadmap.]**
 6. Two conflicting facts about the same subject produce a surfaced
    conflict, not a silently chosen value. **[Verified — a mixed-signal
    case (higher authority but staler vs. lower authority but fresher)
@@ -269,7 +285,61 @@ manual check the user has confirmed.
 
 ## 8. Implementation progress
 
-### Done (this session — fact authority / conflict-resolution milestone)
+### Done (this session — document ingestion / embeddings / Claude extraction milestone)
+- `asos/documents/parsing.py`: extracts text from PDF (per-page),
+  DOCX (paragraph groups), PPTX (per-slide), and plain text/Markdown.
+  Verified against real generated fixture files for every format, not
+  just mocks (a real PDF via `fpdf2`, real DOCX/PPTX via
+  `python-docx`/`python-pptx`).
+- `asos/documents/chunking.py`: packs parsed text into ~400-word
+  chunks (500 max); an oversized single paragraph is hard-split rather
+  than either truncated or left as one unbounded chunk. A real bug was
+  caught in a self-written test here too (the test's own expectation
+  was wrong, not the code) — worth noting only because it shows the
+  test-after-each-piece habit catching problems on both sides.
+- `asos/documents/embeddings.py`: defines the `EmbeddingProvider`
+  interface plus exactly one implementation —
+  `HashingEmbeddingProvider`, a deterministic bag-of-words placeholder.
+  **This is explicitly NOT a real semantic embedding model** — it
+  captures word overlap, not meaning. It exists so the full pipeline
+  (chunk -> embed -> store -> retrieve) could be built and correctly
+  tested end-to-end now, without a real model dependency this sandbox
+  can't download (no network access to a model hub). Swapping in a
+  real local model later should only mean adding one new class and
+  changing one construction site — see the module docstring.
+- `asos/documents/ingestion.py`: `ingest_document()` — parses, chunks,
+  embeds, and stores a document, copying the source file into AsOS's
+  own data directory first (so ingestion doesn't silently depend on
+  the original file staying where it was, e.g. a Downloads folder the
+  user later cleans up). Verified with real files end-to-end, including
+  that the original can be deleted afterward without affecting AsOS.
+- `asos/documents/retrieval.py`: brute-force cosine-similarity search
+  over `document_chunks`, scoped by course or by an explicit document-
+  id set (e.g. the documents linked to one assessment). Deliberately
+  not a vector index (sqlite-vec/Chroma) — see decision table.
+- `asos/documents/extraction.py` + `asos/documents/claude_client.py`:
+  the one-time structured-fact-extraction pass. `ClaudeClient` is an
+  injectable protocol (same DI pattern as the Canvas HTTP session and
+  the keyring backend); extraction is fully tested against a fake
+  client (valid JSON, markdown-fenced JSON, malformed JSON, wrong
+  shape, missing fields — all produce either correct facts or a clear
+  `ExtractionError`). `AnthropicClaudeClient` is a real implementation
+  against the documented Messages API shape, but **has not been
+  exercised with a real API key or a live network call** — that
+  requires the user's own `anthropic_api_key` and explicit awareness
+  that it's a real, billed request. Extracted facts are recorded via
+  `record_fact()` with `source_type=SYLLABUS`, `document_id` set for
+  provenance, and MEDIUM (not HIGH) confidence by default — see
+  decision table for why.
+- `asos docs ingest` / `asos docs search` / `asos docs extract-facts`
+  CLI commands. `ingest` and `search` verified end-to-end against a
+  real file through the real CLI binary (not just pytest); `extract-
+  facts` verified to fail cleanly and actionably when credentials
+  aren't set (the actual live-extraction path is untested, per above).
+- 90 automated tests passing (was 54 after the authority-engine
+  milestone).
+
+### Done (previous session — fact authority / conflict-resolution milestone)
 - `asos/facts/authority.py`: the authority engine implementing the
   locked design — a fact only auto-wins over a competitor if it's at
   least as strong on ALL THREE axes (source authority weight,
@@ -362,40 +432,51 @@ manual check the user has confirmed.
   service lifecycle, and CLI smoke tests.
 
 ### Explicitly not started yet
-- **Live Canvas verification.** This sandbox's network egress is
-  restricted to package registries (PyPI, npm, GitHub, etc.) and
-  cannot reach any Canvas instance. `CanvasClient`/`CanvasSyncWorker`
-  are thoroughly unit-tested against realistic mocked Canvas API
-  responses, but a real end-to-end sync against an actual Canvas
-  account has NOT been verified and needs to happen on the user's own
-  machine with real credentials (`asos creds set canvas_base_url` /
-  `asos creds set canvas_api_token`, then `asos canvas sync`).
+- **Real embedding model.** Only the `HashingEmbeddingProvider`
+  placeholder exists (see above) — real semantic retrieval quality
+  needs a real local model, chosen and latency-tested on the actual
+  Windows CPU-only machine, not assumed here.
+- **Live Claude API verification.** `AnthropicClaudeClient` exists and
+  matches the documented API shape but has never made a real call —
+  needs the user's own `anthropic_api_key` and awareness it's billed.
+- **Live Canvas verification** (carried over from the Canvas sync
+  milestone — still true). This sandbox's network egress is restricted
+  to package registries (PyPI, npm, GitHub, etc.) and cannot reach any
+  Canvas instance. `CanvasClient`/`CanvasSyncWorker` are thoroughly
+  unit-tested against realistic mocked Canvas API responses, but a real
+  end-to-end sync against an actual Canvas account has NOT been
+  verified and needs to happen on the user's own machine with real
+  credentials (`asos creds set canvas_base_url` / `asos creds set
+  canvas_api_token`, then `asos canvas sync`).
 - Deleted/withdrawn Canvas entities are logged for visibility but not
   pruned locally — see the decision table for reasoning; revisit if
   this proves wrong in practice.
 - Periodic/scheduled Canvas polling (the sync worker currently runs
   once per invocation; wiring it into `CoreService`'s loop on an
   interval is a natural next step, not yet done).
-- Wiring Canvas sync / document ingestion to actually call
-  `record_fact()` — the authority engine exists and is tested in
-  isolation, but nothing populates `facts` from real Canvas/syllabus
-  data yet. That naturally happens as part of the document-ingestion
-  milestone (syllabus extraction) and, likely, a small addition to
-  Canvas sync (e.g. recording assignment due dates as facts too, so
-  they can participate in conflict resolution against syllabus dates).
-- Claude API integration
+- Wiring Canvas sync to also record assignment due dates as `facts`
+  (so they can participate in conflict resolution against
+  syllabus-extracted dates) — currently only syllabus extraction
+  writes to `facts`.
+- A watched-folder worker that automatically ingests dropped files —
+  `docs ingest` is a manual CLI command for now.
+- Manually confirming assessment-to-concept/document links from
+  ingested study guides (the schema and `get_documents_for_assessment`
+  helper exist; nothing yet proposes or confirms these links).
 - Document ingestion / embeddings / vector index
 - Voice pipeline (hotkey capture, STT, TTS)
 - Autostart registration (Windows Task Scheduler / Startup folder)
 - Dashboard UI
 
 ### Open technical decisions for upcoming milestones
-- Exact vector index technology for `document_chunks.embedding`
-  (candidates: sqlite-vec, a local Chroma instance, or a flat numpy
-  index — pick when the ingestion milestone starts; don't pre-decide).
 - Exact local embedding model (e.g. bge-small vs all-MiniLM) — pick
   against real CPU latency measurements on the target machine, not
-  assumptions made in this sandbox.
+  assumptions made in this sandbox. `HashingEmbeddingProvider` is a
+  placeholder, not a candidate.
+- Whether a real vector index (sqlite-vec, Chroma) is ever actually
+  needed — current brute-force cosine similarity is deliberately kept
+  simple for a single-semester corpus size; revisit only if real usage
+  shows it's too slow.
 - Global hotkey library choice for Windows (e.g. `keyboard` vs
   `pynput` vs a Windows-native approach) — deferred to the voice
   milestone.
@@ -425,6 +506,11 @@ manual check the user has confirmed.
 | Fact authority resolved by 3-axis dominance, not a single blended score | A blended score (e.g. weighted sum of authority+explicitness+recency) would hide *why* a fact won and could pick something that's only "better on average" while being staler or less explicit than the alternative — the opposite of the transparency the design explicitly called for. Requiring dominance on all three axes independently means a fact only auto-wins when it's unambiguously better, and any genuine trade-off (higher authority but staler vs. lower authority but fresher) correctly surfaces as a conflict instead of being guessed at. |
 | Fact conflict resolution never deletes or edits existing facts | Resolving a conflict (`resolve_conflict_with_user_statement`) creates a new fact and marks previous ones `superseded_by_fact_id` + `conflict_status=RESOLVED`, rather than overwriting them. Mirrors the same append-only-history principle used for `mastery_events` — "why did it used to think X" stays answerable. |
 | `seed_default_sources()` is a Python function called on startup, not an Alembic data migration | Keeps the default authority weights in exactly one place (avoiding a second copy embedded in a migration file that could silently drift from the code), and is trivially idempotent. Standard Alembic guidance is that data migrations should be self-contained with literal values rather than importing application code (since the app's models can change after a migration is written) — but for a single-user app, the duplication risk of hand-copying the weight table into a migration outweighed that purity concern here. |
+| Placeholder (`HashingEmbeddingProvider`) instead of a real embedding model, for now | This sandbox cannot download real model weights (no network access to a model hub). Rather than block the whole ingestion pipeline on that, the embedding step is an injectable interface with exactly one implementation swap point — the placeholder proves the plumbing (chunk -> embed -> store -> cosine-similarity retrieve) works correctly, and it's explicitly documented as non-semantic so nobody mistakes it for a real quality bar. |
+| Brute-force cosine similarity, no vector index library | A single user's single-semester corpus is realistically a few dozen documents and at most a few thousand chunks — a plain Python loop over rows already fetched from SQLite is fast enough, and adding sqlite-vec/Chroma now would be complexity with no measured benefit. Revisit only if real usage proves this too slow. |
+| Document ingestion copies the source file into AsOS's own data directory rather than referencing it in place | The original file (e.g. a Canvas download in the user's Downloads folder) is outside AsOS's control and could be moved, renamed, or deleted at any time. Copying once at ingest time means AsOS's record of a document never silently breaks because of something the user did elsewhere. |
+| Syllabus-extracted facts get MEDIUM confidence by default, not HIGH, despite `explicitness=EXPLICIT_STATEMENT` | `explicitness` describes the *source document* (the syllabus states this directly, it isn't inferred from context) — but the *extraction mechanism* is still an LLM parse of that document, which can misread or hallucinate. Confidence is deliberately more conservative than a human directly transcribing the same sentence would warrant, so a wrong extraction doesn't inherit unwarranted trust just because the underlying sentence was unambiguous. |
+| Claude client (for extraction) and Canvas HTTP session both use the same injectable-protocol DI pattern | Consistency: the same pattern already proven for `keyring` (credentials) and `requests.Session` (Canvas) means every external-service boundary in this codebase is tested the same way — a fake implementing the same small interface — rather than each milestone inventing its own mocking approach. |
 
 ---
 

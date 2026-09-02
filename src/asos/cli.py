@@ -30,9 +30,11 @@ app = typer.Typer(help="AsOS — Assist Operating System")
 creds_app = typer.Typer(help="Manage locally-stored credentials (Canvas token, Anthropic API key, ...).")
 canvas_app = typer.Typer(help="Canvas sync commands.")
 facts_app = typer.Typer(help="Query and resolve fact conflicts.")
+docs_app = typer.Typer(help="Document ingestion (syllabi, lecture notes, study guides) and search.")
 app.add_typer(creds_app, name="creds")
 app.add_typer(canvas_app, name="canvas")
 app.add_typer(facts_app, name="facts")
+app.add_typer(docs_app, name="docs")
 
 logger = logging.getLogger("asos.cli")
 
@@ -220,6 +222,125 @@ def facts_resolve(
     with make_session_factory(engine)() as session:
         fact = resolve_conflict_with_user_statement(session, course_id=course_id, subject=subject, value=value)
         typer.echo(f"Recorded '{subject}' = '{value}' (fact id {fact.id}). Future conflicts on this subject won't resurface this.")
+    engine.dispose()
+
+
+@docs_app.command("ingest")
+def docs_ingest(
+    path: str = typer.Argument(..., help="Path to a .pdf, .docx, .pptx, .txt, or .md file."),
+    source_type: str = typer.Option(..., help="One of: syllabus, lecture, notes, study_guide, other"),
+    course_id: int = typer.Option(None, help="Course DB id to associate this document with."),
+    title: str = typer.Option(None, help="Defaults to the filename if omitted."),
+) -> None:
+    """Parse, chunk, embed, and store a document.
+
+    NOTE: uses a placeholder (non-semantic) embedding — see
+    PROJECT.md's open decisions. Retrieval will work but with mediocre
+    relevance quality until a real local embedding model is chosen and
+    validated on the target machine."""
+    from pathlib import Path
+
+    from asos.db.base import Base, make_engine, make_session_factory
+    from asos.db import models  # noqa: F401
+    from asos.db.enums import DocumentSourceType
+    from asos.documents.embeddings import HashingEmbeddingProvider
+    from asos.documents.ingestion import ingest_document
+
+    try:
+        source_type_enum = DocumentSourceType(source_type)
+    except ValueError:
+        typer.echo(f"Unknown source_type '{source_type}'. Must be one of: {', '.join(t.value for t in DocumentSourceType)}")
+        raise typer.Exit(1)
+
+    source_path = Path(path)
+    if not source_path.exists():
+        typer.echo(f"File not found: {path}")
+        raise typer.Exit(1)
+
+    engine = make_engine(get_database_url())
+    Base.metadata.create_all(engine)
+    with make_session_factory(engine)() as session:
+        document = ingest_document(
+            session,
+            source_path=source_path,
+            course_id=course_id,
+            source_type=source_type_enum,
+            title=title,
+            embedding_provider=HashingEmbeddingProvider(),
+        )
+        typer.echo(f"Ingested '{document.title}' (document id {document.id}).")
+    engine.dispose()
+
+
+@docs_app.command("search")
+def docs_search(
+    query: str = typer.Argument(...),
+    course_id: int = typer.Option(None, help="Limit search to one course."),
+    top_k: int = typer.Option(5),
+) -> None:
+    """Search ingested document chunks (placeholder embedding — see `docs ingest`)."""
+    from asos.db.base import make_engine, make_session_factory
+    from asos.documents.embeddings import HashingEmbeddingProvider
+    from asos.documents.retrieval import search_chunks
+
+    engine = make_engine(get_database_url())
+    with make_session_factory(engine)() as session:
+        results = search_chunks(
+            session, query=query, embedding_provider=HashingEmbeddingProvider(), course_id=course_id, top_k=top_k
+        )
+        if not results:
+            typer.echo("No matching content found.")
+        for r in results:
+            label = f" [{r.chunk.page_or_slide}]" if r.chunk.page_or_slide else ""
+            typer.echo(f"({r.score:.3f}) {r.document.title}{label}: {r.chunk.content[:200]}")
+    engine.dispose()
+
+
+@docs_app.command("extract-facts")
+def docs_extract_facts(document_id: int = typer.Argument(...)) -> None:
+    """Run the one-time Claude extraction pass over an already-ingested
+    document's text, recording any facts found. Requires
+    anthropic_api_key to be set — this makes a real, billed API call."""
+    from asos.db.base import make_engine, make_session_factory
+    from asos.db.models import Document, DocumentChunk
+    from asos.documents.claude_client import AnthropicClaudeClient, ClaudeAPIError
+    from asos.documents.extraction import ExtractionError, extract_syllabus_facts
+
+    vault = _friendly_vault_or_exit()
+    api_key = vault.get_credential_or_none(ANTHROPIC_API_KEY)
+    if not api_key:
+        typer.echo(f"anthropic_api_key is not set. Run: asos creds set {ANTHROPIC_API_KEY}")
+        raise typer.Exit(1)
+
+    engine = make_engine(get_database_url())
+    with make_session_factory(engine)() as session:
+        document = session.get(Document, document_id)
+        if document is None:
+            typer.echo(f"No document with id {document_id}.")
+            raise typer.Exit(1)
+        chunks = (
+            session.query(DocumentChunk)
+            .filter_by(document_id=document_id)
+            .order_by(DocumentChunk.chunk_index)
+            .all()
+        )
+        full_text = "\n\n".join(c.content for c in chunks)
+
+        try:
+            facts = extract_syllabus_facts(
+                session,
+                course_id=document.course_id,
+                document_id=document.id,
+                syllabus_text=full_text,
+                claude_client=AnthropicClaudeClient(api_key=api_key),
+            )
+        except (ClaudeAPIError, ExtractionError) as exc:
+            typer.echo(f"Extraction failed: {exc}")
+            raise typer.Exit(1)
+
+        typer.echo(f"Extracted {len(facts)} fact(s):")
+        for f in facts:
+            typer.echo(f"  - {f.subject}: {f.value}")
     engine.dispose()
 
 
