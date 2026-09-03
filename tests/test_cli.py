@@ -61,6 +61,23 @@ def test_docs_ingest_folder_ingests_real_files(isolated_data_dir, tmp_path):
     assert "Ingested 2 document(s)" in result.stdout
 
 
+def test_docs_show_prints_all_chunks(isolated_data_dir, tmp_path):
+    (tmp_path / "syllabus.txt").write_text("Exam 1 covers chapters 1-3. Grading: exams 100%.")
+    ingest_result = runner.invoke(app, ["docs", "ingest", str(tmp_path / "syllabus.txt"), "--source-type", "syllabus"])
+    assert ingest_result.exit_code == 0
+
+    result = runner.invoke(app, ["docs", "show", "1"])
+    assert result.exit_code == 0
+    assert "chapters 1-3" in result.stdout
+    assert "chunk 0" in result.stdout
+
+
+def test_docs_show_nonexistent_document_fails_clearly(isolated_data_dir):
+    result = runner.invoke(app, ["docs", "show", "99999"])
+    assert result.exit_code == 1
+    assert "No document with id" in result.stdout
+
+
 def test_docs_ingest_folder_nonexistent_directory_fails_clearly(isolated_data_dir):
     result = runner.invoke(app, ["docs", "ingest-folder", "/no/such/directory", "--source-type", "syllabus"])
     assert result.exit_code == 1

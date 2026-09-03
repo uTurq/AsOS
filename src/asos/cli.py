@@ -307,6 +307,38 @@ def docs_ingest(
     engine.dispose()
 
 
+@docs_app.command("show")
+def docs_show(document_id: int) -> None:
+    """Dump everything AsOS actually extracted from one document, in
+    order, with no relevance-score guessing involved — for checking
+    whether missing facts are because the source material doesn't
+    state them, or because parsing mangled something (e.g. PDF tables,
+    which text extraction handles poorly)."""
+    from asos.db.base import make_engine, make_session_factory
+    from asos.db.base import Base
+    from asos.db import models  # noqa: F401
+    from asos.db.models import Document, DocumentChunk
+
+    engine = make_engine(get_database_url())
+    Base.metadata.create_all(engine)
+    with make_session_factory(engine)() as session:
+        document = session.get(Document, document_id)
+        if document is None:
+            typer.echo(f"No document with id {document_id}.")
+            raise typer.Exit(1)
+        typer.echo(f"'{document.title}' ({document.source_type.value}, file: {document.file_path})")
+        chunks = (
+            session.query(DocumentChunk)
+            .filter_by(document_id=document_id)
+            .order_by(DocumentChunk.chunk_index)
+            .all()
+        )
+        for c in chunks:
+            label = f" [{c.page_or_slide}]" if c.page_or_slide else ""
+            typer.echo(f"\n--- chunk {c.chunk_index}{label} ---\n{c.content}")
+    engine.dispose()
+
+
 @docs_app.command("ingest-folder")
 def docs_ingest_folder(
     directory: str = typer.Argument(..., help="Folder containing .pdf/.docx/.pptx/.txt/.md files."),

@@ -334,7 +334,26 @@ manual check the user has confirmed.
 
 ## 8. Implementation progress
 
-### Done (this session — asos facts list, prompted by a real usability gap)
+### Done (this session — asos docs show, prompted by real diagnostic need)
+- **Real diagnostic need**: after `asos facts list` showed only 1
+  extracted fact for one real syllabus (vs. 7 and 3 for the other two
+  ingested that batch), needed a way to tell whether that's because
+  the syllabus genuinely doesn't state exam dates/grading in prose, or
+  because PDF table extraction (a known real weakness — text
+  extraction handles tables poorly) mangled something before Claude
+  ever saw it. `docs search`'s relevance ranking wasn't a reliable way
+  to check this, since the placeholder embedding could plausibly rank
+  that document's chunks low even if the content is fine.
+- `asos docs show <document_id>` — dumps every chunk actually stored
+  for one document, in order, with no relevance-score guessing
+  involved. Caught and fixed a real bug while testing this: the
+  command didn't call the `Base.metadata.create_all` safety net other
+  read commands use, so a database that was never `init-db`'d raised a
+  raw `sqlite3.OperationalError` instead of a clean message — fixed to
+  match the pattern every other CLI command already follows.
+- 187 automated tests passing (was 185 after `asos facts list`).
+
+### Done (previous session — asos facts list, prompted by a real usability gap)
 - **Real gap found by actual use**: the user ran `docs ingest-folder
   --extract-facts` on two real syllabi and got back only fact *counts*
   ("extracted 1 fact(s)", "extracted 3 fact(s)") with no way to see
