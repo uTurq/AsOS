@@ -5,7 +5,7 @@ from unittest.mock import patch
 import pytest
 import requests
 
-from asos.documents.claude_client import AnthropicClaudeClient, ClaudeAPIError
+from asos.llm.anthropic_client import AnthropicClaudeClient, ClaudeAPIError
 
 
 class _FakeResponse:

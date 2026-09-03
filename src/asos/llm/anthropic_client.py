@@ -1,6 +1,6 @@
 """
 Real Claude API client, implementing the `ClaudeClient` protocol from
-asos.documents.extraction (`.complete(prompt) -> str`).
+asos.llm.client (`.complete(prompt) -> str`).
 
 NOT verified against a live call from this sandbox — this environment
 has no anthropic_api_key configured and making a real, billed API call

@@ -20,12 +20,12 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Protocol
 
 from sqlalchemy.orm import Session
 
 from asos.db.enums import FactConfidence, FactExplicitness, SourceType
 from asos.facts.authority import record_fact
+from asos.llm.client import ClaudeClient
 
 logger = logging.getLogger("asos.documents.extraction")
 
@@ -50,10 +50,6 @@ Syllabus text:
 {text}
 ---
 """
-
-
-class ClaudeClient(Protocol):
-    def complete(self, prompt: str) -> str: ...
 
 
 class ExtractionError(RuntimeError):

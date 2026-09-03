@@ -162,7 +162,13 @@ Core Service (asos.service.core.CoreService)
                                                        automatic scanning — currently a manual
                                                        `asos notify scan` invocation only, same
                                                        status as Canvas sync]
-  - Claude API client                                [not yet built]
+  - Claude API client                                [implemented: asos.llm.client (protocol) +
+                                                       asos.llm.anthropic_client (real impl, shared
+                                                       across extraction and the core assistant);
+                                                       asos.core.context + asos.core.assistant tie
+                                                       everything built so far into actual Q&A and
+                                                       daily-briefing generation via CLI (`asos ask`/
+                                                       `asos brief`)]
 
 Local Data Store
   - SQLite via SQLAlchemy models + Alembic migrations [implemented, full v1 schema]
@@ -305,14 +311,68 @@ manual check the user has confirmed.
 14. Voice-lite hotkey → STT → core → TTS works end-to-end for a
     briefing + one Q&A exchange, no text required.
 15. CLI/text path works identically for every feature above (voice is
-    an interface, not a separate code path).
+    an interface, not a separate code path). **[The CLI/text path now
+    exists and is the ONLY path — `asos ask`/`asos brief` are what
+    voice-lite will call into once built, not a parallel
+    implementation, so this criterion is satisfied by construction
+    once voice-lite reuses `asos.core.assistant` directly.]**
 16. "Wake up AsOS" (via hotkey) produces a real, DB-traceable briefing
     across ≥2 courses: schedule, one Critical/Notable item, one weak
-    concept — no hallucinated content.
+    concept — no hallucinated content. **[The text equivalent (`asos
+    brief`) is built and its prompt-grounding is verified end-to-end
+    short of the live network call — see above. The actual hotkey
+    trigger doesn't exist yet (voice-lite, step 10); this criterion
+    will be fully satisfied once that thin layer calls the same
+    `generate_daily_briefing()` already built and tested here.]**
 
 ## 8. Implementation progress
 
-### Done (this session — task tracking + notification severity engine milestone)
+### Done (this session — core assistant milestone: text/CLI interface wiring Claude into everything)
+- **Small refactor first**: moved the `ClaudeClient` protocol and the
+  real `AnthropicClaudeClient` implementation out of
+  `asos.documents.*` into a shared `asos/llm/` package
+  (`asos/llm/client.py`, `asos/llm/anthropic_client.py`), since Claude
+  is now called from more than just document extraction. Full test
+  suite re-run immediately after to confirm the refactor broke nothing
+  (it didn't — same 137 tests passed before touching anything new).
+- `asos/core/context.py`: `build_context_snapshot()` — the local,
+  Claude-free half of architectural principle 1. Assembles today's
+  schedule, open tasks, upcoming assessments (with preparedness where
+  concepts are linked), unresolved fact conflicts, and pending
+  notifications into one structured snapshot. Explicitly read-only —
+  verified it never marks a notification delivered even when called
+  repeatedly, unlike the notification-delivery consumption functions.
+  `format_context_for_prompt()` renders it to plain text for a prompt.
+- `asos/core/assistant.py`: `answer_query()` / `generate_daily_briefing()`
+  — the only two places in the codebase that call Claude for open-ended
+  synthesis rather than structured extraction. Both prompts explicitly
+  instruct Claude to answer only from the supplied context and say so
+  plainly rather than guess when something isn't there — the direct
+  guardrail against acceptance criterion 16 (a briefing must never
+  contain hallucinated content). Tested against a fake Claude client:
+  confirmed real DB content (not fabricated placeholder text) actually
+  reaches the prompt, and that the grounding instruction is present.
+- `asos/memory/episodic.py`: `record_episodic_note()` — the storage
+  path for the semantic-memory tier. Deliberately just storage, not an
+  automatic "summarize every conversation" pipeline — deciding what's
+  worth remembering is a judgment call for a real conversation loop
+  (voice-lite) to make, not something to fake here.
+- **Verified the full pipeline end-to-end, short of the live network
+  call**: set up a real task in a real DB, intercepted the actual
+  `requests.post` call `AnthropicClaudeClient` makes, and confirmed the
+  real task title and the real user query both appear in the exact
+  prompt that would be sent — proving vault → context assembly →
+  prompt construction → HTTP call shape → response parsing all work
+  correctly together. The one hop still unverified is the live network
+  round-trip to Anthropic's servers itself, which needs the user's own
+  key per the standing sandbox limitation.
+- CLI: `asos ask "<query>"`, `asos brief` — both verified to fail
+  cleanly with an actionable message when `anthropic_api_key` isn't
+  set, consistent with every other external-service CLI command.
+- 153 automated tests passing (was 137 after the task/notification
+  milestone).
+
+### Done (previous session — task tracking + notification severity engine milestone)
 - `asos/tasks/management.py`: `create_task()` / `update_task_state()`.
   `related_assignment_id` is optional and nothing here ever reads or
   writes `Assignment.canvas_status` — verified directly (acceptance
@@ -559,8 +619,10 @@ manual check the user has confirmed.
   needs a real local model, chosen and latency-tested on the actual
   Windows CPU-only machine, not assumed here.
 - **Live Claude API verification.** `AnthropicClaudeClient` exists and
-  matches the documented API shape but has never made a real call —
-  needs the user's own `anthropic_api_key` and awareness it's billed.
+  matches the documented API shape, and is now exercised by two
+  independent callers (syllabus extraction and the core assistant) —
+  but neither has ever made a real network call. Needs the user's own
+  `anthropic_api_key` and awareness it's billed.
 - **Live Canvas verification** (carried over from the Canvas sync
   milestone — still true). This sandbox's network egress is restricted
   to package registries (PyPI, npm, GitHub, etc.) and cannot reach any
@@ -587,9 +649,6 @@ manual check the user has confirmed.
   helper exist; nothing yet proposes these links automatically — you
   can create them via `asos study link-concept`, but nothing reads a
   study guide and suggests which concepts it covers).
-- Local task tracking CLI/wiring (schema exists and is tested at the
-  model level; no `asos task` commands yet — that's the next roadmap
-  step).
 - Periodic/scheduled automatic notification scanning (`asos notify
   scan` is a manual command right now, same status as Canvas sync —
   wiring both into `CoreService`'s own loop on an interval is a
@@ -598,13 +657,12 @@ manual check the user has confirmed.
   assignments (mentioned in the original design as a natural behavior
   — "a Canvas assignment can spawn a task automatically" — but not
   built; tasks are currently created manually or by future callers).
-- Wiring any of this (mastery, preparedness, facts, Canvas,
-  notifications) into an actual daily-briefing or "what should I study"
-  recommendation flow — every piece so far is queryable individually
-  via CLI, but nothing synthesizes them into the proactive experience
-  described in the original vision yet. That's the text/CLI-interface
-  milestone (step 9) and beyond.
-- Document ingestion / embeddings / vector index
+- Wiring `answer_query`/`generate_daily_briefing` into `CoreService`'s
+  own loop for proactive, unprompted delivery — they're built and
+  callable via CLI now, but nothing calls them automatically yet
+  (and per the locked v1 scope, proactive unprompted interrupts are
+  deferred to v1.1+ anyway — this is about the pull-based briefing
+  becoming schedulable, not about adding push notifications).
 - Voice pipeline (hotkey capture, STT, TTS)
 - Autostart registration (Windows Task Scheduler / Startup folder)
 - Dashboard UI
@@ -658,6 +716,9 @@ manual check the user has confirmed.
 | Notification classification (judgment) kept in a separate module from delivery (persistence/policy) | Same split as document parsing/chunking vs. ingestion/retrieval: "how urgent is this?" is a pure function of an assessment's preparedness or a task's due date, testable with zero DB access; "what do we do about it" (dedup, escalate, rate-limit, respect quiet hours) is a persistence/policy concern. Mixing them would have made the urgency judgment harder to test in isolation and the delivery guardrails harder to reason about independently. |
 | Notifications escalate in place rather than ever creating a second row for the same target | Locked requirement: "something starts Ambient and can escalate to Critical... but should never downgrade silently." Representing escalation as an update to the same row (rather than a new row superseding an old one, as Facts do) was the simpler correct model here — a notification is inherently about current state ("is this still urgent"), not a provenance trail of multiple sources disagreeing, so the Facts append-only pattern doesn't apply the same way. |
 | NOTABLE is delivered by a briefing pull, AMBIENT is never auto-delivered at all | Matches the three-tier design exactly: NOTABLE is "bundled — delivered only at next natural touchpoint," so a briefing calling `get_notable_notifications_for_briefing` IS that touchpoint and marking delivered=True then is correct. AMBIENT is "logged only... never pushed," so nothing should ever flip its delivered flag automatically — it stays queryable indefinitely via an explicit ask. |
+| Context assembly (`asos.core.context`) is entirely separate from and precedes any Claude call | Direct implementation of architectural principle 1: local code does all retrieval, Claude only synthesizes. Keeping this as its own module with zero Claude dependency means the "what does AsOS currently know" question is testable (and debuggable) without ever touching an API key, and means Claude's context is always something a person could point to in the database — never something Claude reached for on its own. |
+| `ClaudeClient` protocol and `AnthropicClaudeClient` moved into a shared `asos/llm/` package rather than staying under `asos/documents/` | Claude is now called from two independent places (syllabus extraction and the core assistant), and a third (voice) is coming. Keeping the shared interface under a feature-specific package would have made the next caller either duplicate the protocol or import from an unrelated feature's namespace. Moved once, at the point a second real caller appeared — not preemptively before there was a second user of it. |
+| Every Claude prompt in the core assistant explicitly instructs "never invent... say plainly you don't have that information" | Direct implementation of acceptance criterion 16 ("no hallucinated content"). This is stated as an instruction in the prompt, not enforced in code, because it can't be — verifying it holds in practice requires a real model call this sandbox can't make; the test suite verifies the instruction is present and that real context reaches the prompt, not that Claude obeys it. |
 
 ---
 

@@ -309,7 +309,7 @@ def docs_extract_facts(document_id: int = typer.Argument(...)) -> None:
     anthropic_api_key to be set — this makes a real, billed API call."""
     from asos.db.base import make_engine, make_session_factory
     from asos.db.models import Document, DocumentChunk
-    from asos.documents.claude_client import AnthropicClaudeClient, ClaudeAPIError
+    from asos.llm.anthropic_client import AnthropicClaudeClient, ClaudeAPIError
     from asos.documents.extraction import ExtractionError, extract_syllabus_facts
 
     vault = _friendly_vault_or_exit()
@@ -605,6 +605,58 @@ def notify_ambient() -> None:
             typer.echo("Nothing in the ambient log.")
         for n in results:
             typer.echo(f"  {n.title}: {n.body}")
+    engine.dispose()
+
+
+@app.command("ask")
+def ask(query: str) -> None:
+    """Ask AsOS a question, grounded in your real current academic
+    state (schedule, tasks, preparedness, conflicts, notifications).
+    Requires anthropic_api_key — this makes a real, billed API call."""
+    from asos.core.assistant import answer_query
+    from asos.db.base import make_engine, make_session_factory
+    from asos.llm.anthropic_client import AnthropicClaudeClient, ClaudeAPIError
+
+    vault = _friendly_vault_or_exit()
+    api_key = vault.get_credential_or_none(ANTHROPIC_API_KEY)
+    if not api_key:
+        typer.echo(f"anthropic_api_key is not set. Run: asos creds set {ANTHROPIC_API_KEY}")
+        raise typer.Exit(1)
+
+    engine = make_engine(get_database_url())
+    with make_session_factory(engine)() as session:
+        try:
+            response = answer_query(session, query, AnthropicClaudeClient(api_key=api_key))
+        except ClaudeAPIError as exc:
+            typer.echo(f"Couldn't reach Claude: {exc}")
+            raise typer.Exit(1)
+        typer.echo(response)
+    engine.dispose()
+
+
+@app.command("brief")
+def brief() -> None:
+    """Generate the daily briefing — the text equivalent of 'wake up
+    AsOS.' Requires anthropic_api_key — this makes a real, billed API
+    call."""
+    from asos.core.assistant import generate_daily_briefing
+    from asos.db.base import make_engine, make_session_factory
+    from asos.llm.anthropic_client import AnthropicClaudeClient, ClaudeAPIError
+
+    vault = _friendly_vault_or_exit()
+    api_key = vault.get_credential_or_none(ANTHROPIC_API_KEY)
+    if not api_key:
+        typer.echo(f"anthropic_api_key is not set. Run: asos creds set {ANTHROPIC_API_KEY}")
+        raise typer.Exit(1)
+
+    engine = make_engine(get_database_url())
+    with make_session_factory(engine)() as session:
+        try:
+            response = generate_daily_briefing(session, AnthropicClaudeClient(api_key=api_key))
+        except ClaudeAPIError as exc:
+            typer.echo(f"Couldn't reach Claude: {exc}")
+            raise typer.Exit(1)
+        typer.echo(response)
     engine.dispose()
 
 
