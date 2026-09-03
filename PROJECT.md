@@ -153,8 +153,15 @@ Core Service (asos.service.core.CoreService)
                                                        (`asos study preparedness`); verified against
                                                        the exact worked example from the original
                                                        design conversation]
-  - Task state tracker                               [schema only]
-  - Notification severity engine                     [schema only]
+  - Task state tracker                               [implemented: asos.tasks.management;
+                                                       CLI (`asos task create/update/list`)]
+  - Notification severity engine                     [implemented: asos.notifications.classification/
+                                                       delivery/scan; CLI (`asos notify
+                                                       scan/critical/briefing/ambient`); NOT yet
+                                                       wired into CoreService's own loop for periodic
+                                                       automatic scanning — currently a manual
+                                                       `asos notify scan` invocation only, same
+                                                       status as Canvas sync]
   - Claude API client                                [not yet built]
 
 Local Data Store
@@ -279,8 +286,11 @@ manual check the user has confirmed.
    denominator", not just a number.]**
 10. A task with no Canvas counterpart can be created, updated through
     all five states, and persists independent of any Canvas assignment.
+    **[Verified.]**
 11. Marking a Canvas-linked task `done` locally doesn't alter/require a
-    Canvas submission, and vice versa.
+    Canvas submission, and vice versa. **[Verified — the sync worker's
+    equivalent test from the Canvas milestone and this milestone's own
+    task-management test both confirm `canvas_status` is untouched.]**
 12. Mastery events accumulate (never overwritten); derived score
     changes appropriately with new evidence. **[Verified — including a
     dedicated test confirming a recent miss visibly lowers the score
@@ -288,6 +298,10 @@ manual check the user has confirmed.
     history alone does NOT register as confidently "strong."]**
 13. Notification severity classification + delivery bundling/rate
     limiting/quiet hours all behave per the severity engine's rules.
+    **[Verified — escalation-only dedup, quiet-hours wraparound, and
+    the daily rate limit are each directly tested; quiet hours was
+    additionally confirmed against the sandbox's real wall-clock time,
+    not just synthetic timestamps.]**
 14. Voice-lite hotkey → STT → core → TTS works end-to-end for a
     briefing + one Q&A exchange, no text required.
 15. CLI/text path works identically for every feature above (voice is
@@ -298,7 +312,54 @@ manual check the user has confirmed.
 
 ## 8. Implementation progress
 
-### Done (this session — mastery scoring + assessment preparedness milestone)
+### Done (this session — task tracking + notification severity engine milestone)
+- `asos/tasks/management.py`: `create_task()` / `update_task_state()`.
+  `related_assignment_id` is optional and nothing here ever reads or
+  writes `Assignment.canvas_status` — verified directly (acceptance
+  criteria 10/11): a task with no Canvas counterpart moves through all
+  five states, and marking a Canvas-linked task DONE locally leaves
+  the Canvas-sourced `canvas_status` field completely untouched.
+  `BLOCKED` requires a reason; leaving `BLOCKED` clears it automatically
+  so a stale explanation can't linger.
+- `asos/notifications/classification.py`: pure, DB-free severity
+  judgment — `classify_assessment_urgency()` /
+  `classify_task_urgency()`. Kept separate from persistence (mirrors
+  the parsing/chunking vs. ingestion/retrieval split) so the actual
+  urgency judgment is testable in complete isolation from the DB.
+- `asos/notifications/delivery.py`: the three guardrails from the
+  locked design, all directly tested:
+  - **Escalation only, never silent downgrade** —
+    `upsert_notification_for_target()` raises an existing undelivered
+    notification's severity in place, never creates a duplicate for
+    the same task/assessment, and a later lower-severity classification
+    never downgrades what's already there.
+  - **Quiet hours** — `is_quiet_hours()` correctly wraps midnight;
+    `get_deliverable_critical_notifications()` withholds CRITICAL
+    interrupts entirely during quiet hours.
+  - **Daily rate limit** — capped at `DEFAULT_MAX_CRITICAL_PER_DAY=2`;
+    verified that a 3rd same-day CRITICAL item is correctly held back.
+  - NOTABLE is bundled and only marked delivered when a briefing pulls
+    it (`get_notable_notifications_for_briefing`); AMBIENT is never
+    auto-delivered at all, only queryable on demand
+    (`get_ambient_log`) — both verified.
+- `asos/notifications/scan.py`: `scan_for_notifications()` ties
+  classification + delivery together against real assessments/tasks
+  with due dates — the first piece of actual proactive behavior in the
+  system. Verified idempotent (repeated scans under unchanged
+  conditions never duplicate).
+- **The quiet-hours logic was verified against the sandbox's actual
+  wall-clock time, not just synthetic timestamps**: `asos notify
+  critical` correctly withheld a real critical notification at
+  3:41am (inside default quiet hours), and the identical notification
+  was confirmed deliverable when the same query was run with an
+  explicit 2pm timestamp — proving the gating logic actually works,
+  not just that nothing happened to fire.
+- CLI: `asos task create/update/list`, `asos notify scan/critical/
+  briefing/ambient`.
+- 137 automated tests passing (was 108 after the preparedness
+  milestone).
+
+### Done (previous session — mastery scoring + assessment preparedness milestone)
 - **Reordered from the original roadmap deliberately**: step 6
   (mastery event logging + derived scoring) was pulled forward ahead of
   its planned position, because step 5 (preparedness) is meaningless
@@ -529,12 +590,19 @@ manual check the user has confirmed.
 - Local task tracking CLI/wiring (schema exists and is tested at the
   model level; no `asos task` commands yet — that's the next roadmap
   step).
-- Notification severity engine.
-- Wiring any of this (mastery, preparedness, facts, Canvas) into an
-  actual daily-briefing or "what should I study" recommendation flow —
-  every piece so far is queryable individually via CLI, but nothing
-  synthesizes them into the proactive experience described in the
-  original vision yet. That's implicitly the text/CLI-interface
+- Periodic/scheduled automatic notification scanning (`asos notify
+  scan` is a manual command right now, same status as Canvas sync —
+  wiring both into `CoreService`'s own loop on an interval is a
+  natural next step).
+- Wiring Canvas sync to also generate tasks automatically from new
+  assignments (mentioned in the original design as a natural behavior
+  — "a Canvas assignment can spawn a task automatically" — but not
+  built; tasks are currently created manually or by future callers).
+- Wiring any of this (mastery, preparedness, facts, Canvas,
+  notifications) into an actual daily-briefing or "what should I study"
+  recommendation flow — every piece so far is queryable individually
+  via CLI, but nothing synthesizes them into the proactive experience
+  described in the original vision yet. That's the text/CLI-interface
   milestone (step 9) and beyond.
 - Document ingestion / embeddings / vector index
 - Voice pipeline (hotkey capture, STT, TTS)
@@ -587,6 +655,9 @@ manual check the user has confirmed.
 | Mastery score = recency-weighted average shrunk toward a neutral prior (Bayesian-average smoothing), not a plain weighted average | A plain recency-weighted average, when normalized, is invariant to how old ALL the evidence is (the normalization cancels out a uniform age shift) — so five perfect answers from 60 days ago would look identical to five from yesterday. Adding a constant-weight neutral prior (0.5) means sparse or entirely-stale evidence gets pulled toward "not sure," while abundant recent evidence overwhelms the prior and the score reflects the real track record. This is what makes "we haven't confirmed this recently" show up in the number at all, not just in a separate staleness flag. |
 | `overall_score` (preparedness) excludes no-evidence concepts rather than scoring them as 0 | Scoring an unstudied concept as 0% mastered would fabricate a confidence level AsOS doesn't have — "never studied" and "studied and failing" are different facts, and conflating them would actively mislead someone into thinking they're doing worse than they are on material they simply haven't touched yet. `coverage` exists specifically to prevent the opposite failure mode (mistaking a high score on a small studied slice for full readiness). |
 | Mastery-scoring milestone (originally step 6) pulled forward ahead of preparedness (step 5) | Preparedness is only as honest as the score it's built on — building it against a stubbed/fake score first would have meant redoing the real logic immediately after anyway. The roadmap's dependency was already implicit ("depends on mastery events, stub with fake data initially"); building the real thing first was less total work than building a stub and then a replacement. |
+| Notification classification (judgment) kept in a separate module from delivery (persistence/policy) | Same split as document parsing/chunking vs. ingestion/retrieval: "how urgent is this?" is a pure function of an assessment's preparedness or a task's due date, testable with zero DB access; "what do we do about it" (dedup, escalate, rate-limit, respect quiet hours) is a persistence/policy concern. Mixing them would have made the urgency judgment harder to test in isolation and the delivery guardrails harder to reason about independently. |
+| Notifications escalate in place rather than ever creating a second row for the same target | Locked requirement: "something starts Ambient and can escalate to Critical... but should never downgrade silently." Representing escalation as an update to the same row (rather than a new row superseding an old one, as Facts do) was the simpler correct model here — a notification is inherently about current state ("is this still urgent"), not a provenance trail of multiple sources disagreeing, so the Facts append-only pattern doesn't apply the same way. |
+| NOTABLE is delivered by a briefing pull, AMBIENT is never auto-delivered at all | Matches the three-tier design exactly: NOTABLE is "bundled — delivered only at next natural touchpoint," so a briefing calling `get_notable_notifications_for_briefing` IS that touchpoint and marking delivered=True then is correct. AMBIENT is "logged only... never pushed," so nothing should ever flip its delivered flag automatically — it stays queryable indefinitely via an explicit ask. |
 
 ---
 

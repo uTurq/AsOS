@@ -32,11 +32,15 @@ canvas_app = typer.Typer(help="Canvas sync commands.")
 facts_app = typer.Typer(help="Query and resolve fact conflicts.")
 docs_app = typer.Typer(help="Document ingestion (syllabi, lecture notes, study guides) and search.")
 study_app = typer.Typer(help="Concepts, mastery, assessments, and preparedness.")
+task_app = typer.Typer(help="Local task tracking, independent of Canvas submission state.")
+notify_app = typer.Typer(help="Notification scanning and delivery.")
 app.add_typer(creds_app, name="creds")
 app.add_typer(canvas_app, name="canvas")
 app.add_typer(facts_app, name="facts")
 app.add_typer(docs_app, name="docs")
 app.add_typer(study_app, name="study")
+app.add_typer(task_app, name="task")
+app.add_typer(notify_app, name="notify")
 
 logger = logging.getLogger("asos.cli")
 
@@ -451,6 +455,156 @@ def study_preparedness(assessment_id: int) -> None:
         for label, bucket in [("Strong", prep.strong), ("Developing", prep.developing), ("Weak", prep.weak), ("No evidence yet", prep.no_evidence)]:
             if bucket:
                 typer.echo(f"  {label}: {', '.join(c.concept.name for c in bucket)}")
+    engine.dispose()
+
+
+@task_app.command("create")
+def task_create(
+    title: str,
+    task_type: str = typer.Option(..., help="One of: reading, studying, worksheet, prep, review, other"),
+    course_id: int = typer.Option(None),
+    related_assignment_id: int = typer.Option(None),
+) -> None:
+    """Create a task. related_assignment_id is optional — most study
+    tasks (review, prep) have no Canvas counterpart at all."""
+    from asos.db.base import make_engine, make_session_factory
+    from asos.db.enums import TaskType
+    from asos.tasks.management import create_task
+
+    try:
+        task_type_enum = TaskType(task_type)
+    except ValueError:
+        typer.echo(f"Unknown task_type '{task_type}'. Must be one of: {', '.join(t.value for t in TaskType)}")
+        raise typer.Exit(1)
+
+    engine = make_engine(get_database_url())
+    with make_session_factory(engine)() as session:
+        task = create_task(
+            session, title=title, task_type=task_type_enum, course_id=course_id, related_assignment_id=related_assignment_id
+        )
+        typer.echo(f"Created task '{title}' (id {task.id}), state=not_started.")
+    engine.dispose()
+
+
+@task_app.command("update")
+def task_update(
+    task_id: int,
+    state: str = typer.Argument(..., help="One of: not_started, in_progress, done, skipped, blocked"),
+    blocked_reason: str = typer.Option(None, help="Required if state=blocked"),
+) -> None:
+    """Update a task's state."""
+    from asos.db.base import make_engine, make_session_factory
+    from asos.db.enums import TaskState
+    from asos.tasks.management import update_task_state
+
+    try:
+        state_enum = TaskState(state)
+    except ValueError:
+        typer.echo(f"Unknown state '{state}'. Must be one of: {', '.join(s.value for s in TaskState)}")
+        raise typer.Exit(1)
+
+    engine = make_engine(get_database_url())
+    with make_session_factory(engine)() as session:
+        try:
+            task = update_task_state(session, task_id, state_enum, blocked_reason=blocked_reason)
+        except (LookupError, ValueError) as exc:
+            typer.echo(str(exc))
+            raise typer.Exit(1)
+        typer.echo(f"Task {task_id} is now {task.state.value}.")
+    engine.dispose()
+
+
+@task_app.command("list")
+def task_list(course_id: int = typer.Option(None), state: str = typer.Option(None)) -> None:
+    """List tasks, optionally filtered by course or state."""
+    from asos.db.base import make_engine, make_session_factory
+    from asos.db.enums import TaskState
+    from asos.db.models import Task
+
+    engine = make_engine(get_database_url())
+    with make_session_factory(engine)() as session:
+        query = session.query(Task)
+        if course_id is not None:
+            query = query.filter_by(course_id=course_id)
+        if state is not None:
+            try:
+                query = query.filter_by(state=TaskState(state))
+            except ValueError:
+                typer.echo(f"Unknown state '{state}'.")
+                raise typer.Exit(1)
+        tasks = query.all()
+        if not tasks:
+            typer.echo("No matching tasks.")
+        for t in tasks:
+            due = f" (due {t.due_at})" if t.due_at else ""
+            typer.echo(f"  [{t.id}] {t.title} — {t.state.value}{due}")
+    engine.dispose()
+
+
+@notify_app.command("scan")
+def notify_scan() -> None:
+    """Scan assessments/tasks with due dates and create/escalate
+    notifications as needed. Safe to run repeatedly — never duplicates,
+    never downgrades an existing notification."""
+    from asos.db.base import make_engine, make_session_factory
+    from asos.notifications.scan import scan_for_notifications
+
+    engine = make_engine(get_database_url())
+    with make_session_factory(engine)() as session:
+        results = scan_for_notifications(session)
+        if not results:
+            typer.echo("Nothing new to notify about.")
+        for n in results:
+            typer.echo(f"  [{n.severity.value}] {n.title}")
+    engine.dispose()
+
+
+@notify_app.command("critical")
+def notify_critical() -> None:
+    """Show CRITICAL notifications deliverable right now (respects
+    quiet hours and the daily rate limit)."""
+    from asos.db.base import make_engine, make_session_factory
+    from asos.notifications.delivery import get_deliverable_critical_notifications
+
+    engine = make_engine(get_database_url())
+    with make_session_factory(engine)() as session:
+        results = get_deliverable_critical_notifications(session)
+        if not results:
+            typer.echo("Nothing to interrupt with right now.")
+        for n in results:
+            typer.echo(f"  {n.title}: {n.body}")
+    engine.dispose()
+
+
+@notify_app.command("briefing")
+def notify_briefing() -> None:
+    """Pull bundled NOTABLE notifications, as a daily briefing would."""
+    from asos.db.base import make_engine, make_session_factory
+    from asos.notifications.delivery import get_notable_notifications_for_briefing
+
+    engine = make_engine(get_database_url())
+    with make_session_factory(engine)() as session:
+        results = get_notable_notifications_for_briefing(session)
+        if not results:
+            typer.echo("Nothing notable to bundle right now.")
+        for n in results:
+            typer.echo(f"  {n.title}: {n.body}")
+    engine.dispose()
+
+
+@notify_app.command("ambient")
+def notify_ambient() -> None:
+    """Show the low-priority ambient log (never pushed automatically)."""
+    from asos.db.base import make_engine, make_session_factory
+    from asos.notifications.delivery import get_ambient_log
+
+    engine = make_engine(get_database_url())
+    with make_session_factory(engine)() as session:
+        results = get_ambient_log(session)
+        if not results:
+            typer.echo("Nothing in the ambient log.")
+        for n in results:
+            typer.echo(f"  {n.title}: {n.body}")
     engine.dispose()
 
 
