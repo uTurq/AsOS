@@ -52,6 +52,30 @@ def test_calendar_sync_without_credentials_fails_clearly(isolated_data_dir):
     assert "ics_feed_url is not set" in result.stdout
 
 
+def test_docs_ingest_folder_ingests_real_files(isolated_data_dir, tmp_path):
+    (tmp_path / "syllabus1.txt").write_text("Exam 1 covers chapters 1-3.")
+    (tmp_path / "syllabus2.txt").write_text("Exam 2 covers chapters 4-6.")
+
+    result = runner.invoke(app, ["docs", "ingest-folder", str(tmp_path), "--source-type", "syllabus"])
+    assert result.exit_code == 0
+    assert "Ingested 2 document(s)" in result.stdout
+
+
+def test_docs_ingest_folder_nonexistent_directory_fails_clearly(isolated_data_dir):
+    result = runner.invoke(app, ["docs", "ingest-folder", "/no/such/directory", "--source-type", "syllabus"])
+    assert result.exit_code == 1
+    assert "Not a directory" in result.stdout
+
+
+def test_docs_ingest_folder_extract_facts_without_key_fails_clearly(isolated_data_dir, tmp_path):
+    (tmp_path / "syllabus1.txt").write_text("Exam 1 covers chapters 1-3.")
+    result = runner.invoke(
+        app, ["docs", "ingest-folder", str(tmp_path), "--source-type", "syllabus", "--extract-facts"]
+    )
+    assert result.exit_code == 1
+    assert "requires anthropic_api_key" in result.stdout
+
+
 def test_facts_conflicts_empty_by_default(isolated_data_dir):
     runner.invoke(app, ["init-db"])
     result = runner.invoke(app, ["facts", "conflicts"])

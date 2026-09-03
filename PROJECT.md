@@ -334,7 +334,31 @@ manual check the user has confirmed.
 
 ## 8. Implementation progress
 
-### Done (this session — real-world Canvas verification results + periodic job scheduler)
+### Done (this session — batch document ingestion + first live syllabus extraction result)
+- **First live, real-content confirmation of the syllabus-extraction
+  pipeline**: the user ingested a real syllabus and ran
+  `asos docs extract-facts` for real. It correctly extracted 7 facts —
+  a detailed grading breakdown, an explicit late policy, and four unit
+  exam dates plus the final — all matching the real document. This is
+  the first time this pipeline has been validated against real content
+  rather than a controlled test fixture, and it held up well.
+- `asos/documents/ingestion.py`: `ingest_folder()` — batch-ingests
+  every supported file directly inside a folder (non-recursive by
+  design; subfolders are deliberately skipped rather than walked, to
+  keep behavior predictable). Unsupported file types are silently
+  skipped rather than raising, since a real folder of course materials
+  will have other things in it (images, zips, etc.).
+  Explicitly scoped as the smaller, faster half of a two-part want —
+  full watched-folder automation (drop a file in, no command needed at
+  all) remains a distinct, larger future milestone, not built here.
+- `asos docs ingest-folder <dir> --source-type ... [--extract-facts]`
+  CLI command — the `--extract-facts` flag chains the Claude
+  extraction pass onto every ingested file in one command, for the
+  exact "give it a folder, it just adds all the info" workflow the
+  user asked for.
+- 181 automated tests passing (was 175 after the scheduler milestone).
+
+### Done (previous session — real-world Canvas verification results + periodic job scheduler)
 - **Real-world outcome, recorded for the historical record**: the
   user's institution formally denied Canvas API token generation
   ("This is not something we allow, due to security concerns"). The
@@ -777,8 +801,14 @@ manual check the user has confirmed.
   (so they can participate in conflict resolution against
   syllabus-extracted dates) — currently only syllabus extraction
   writes to `facts`.
-- A watched-folder worker that automatically ingests dropped files —
-  `docs ingest` is a manual CLI command for now.
+- A true watched-folder worker that automatically ingests dropped
+  files with zero command needed at all — `docs ingest`/
+  `docs ingest-folder` are both manual CLI commands (the latter at
+  least batches, so this is a smaller gap than it was, but genuine
+  drop-and-forget automation is still a distinct, larger future
+  milestone: it needs duplicate-ingestion avoidance, automatic
+  source-type inference, and detecting when a file is done being
+  written before reading it).
 - Manually confirming assessment-to-concept/document links from
   ingested study guides (the schema and `get_documents_for_assessment`
   helper exist; nothing yet proposes these links automatically — you

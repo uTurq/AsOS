@@ -86,3 +86,35 @@ def get_documents_for_assessment(session: Session, assessment_id: int) -> list[D
         .where(AssessmentDocument.assessment_id == assessment_id)
     )
     return list(session.execute(stmt).scalars().all())
+
+
+SUPPORTED_EXTENSIONS = (".pdf", ".docx", ".pptx", ".txt", ".md")
+
+
+def ingest_folder(
+    session: Session,
+    *,
+    folder_path: Path,
+    course_id: int | None,
+    source_type: DocumentSourceType,
+    embedding_provider: EmbeddingProvider,
+) -> list[Document]:
+    """Ingests every supported file directly inside folder_path (not
+    recursive — a flat batch, not a directory walk). Unsupported file
+    types are skipped silently rather than raising, since a real
+    folder of course materials will usually contain other things
+    (images, zip files, etc.) alongside what's ingestable."""
+    documents = []
+    for path in sorted(folder_path.iterdir()):
+        if not path.is_file() or path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+            continue
+        document = ingest_document(
+            session,
+            source_path=path,
+            course_id=course_id,
+            source_type=source_type,
+            title=None,
+            embedding_provider=embedding_provider,
+        )
+        documents.append(document)
+    return documents

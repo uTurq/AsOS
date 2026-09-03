@@ -286,6 +286,92 @@ def docs_ingest(
     engine.dispose()
 
 
+@docs_app.command("ingest-folder")
+def docs_ingest_folder(
+    directory: str = typer.Argument(..., help="Folder containing .pdf/.docx/.pptx/.txt/.md files."),
+    source_type: str = typer.Option(..., help="One of: syllabus, lecture, notes, study_guide, other"),
+    course_id: int = typer.Option(None, help="Course DB id to associate every ingested document with."),
+    extract_facts: bool = typer.Option(
+        False, "--extract-facts", help="Also run the Claude fact-extraction pass on each file (requires anthropic_api_key; makes one real, billed call per document)."
+    ),
+) -> None:
+    """Ingest every supported file directly inside a folder in one batch
+    (not recursive — subfolders are skipped). For "I have a folder of
+    syllabi, just handle all of them" rather than one `docs ingest`
+    call per file."""
+    from pathlib import Path
+
+    from asos.db.base import Base, make_engine, make_session_factory
+    from asos.db import models  # noqa: F401
+    from asos.db.enums import DocumentSourceType
+    from asos.db.models import DocumentChunk
+    from asos.documents.embeddings import HashingEmbeddingProvider
+    from asos.documents.ingestion import ingest_folder
+
+    try:
+        source_type_enum = DocumentSourceType(source_type)
+    except ValueError:
+        typer.echo(f"Unknown source_type '{source_type}'. Must be one of: {', '.join(t.value for t in DocumentSourceType)}")
+        raise typer.Exit(1)
+
+    folder_path = Path(directory)
+    if not folder_path.is_dir():
+        typer.echo(f"Not a directory: {directory}")
+        raise typer.Exit(1)
+
+    api_key = None
+    if extract_facts:
+        vault = _friendly_vault_or_exit()
+        api_key = vault.get_credential_or_none(ANTHROPIC_API_KEY)
+        if not api_key:
+            typer.echo(f"--extract-facts requires anthropic_api_key. Run: asos creds set {ANTHROPIC_API_KEY}")
+            raise typer.Exit(1)
+
+    engine = make_engine(get_database_url())
+    Base.metadata.create_all(engine)
+    with make_session_factory(engine)() as session:
+        documents = ingest_folder(
+            session,
+            folder_path=folder_path,
+            course_id=course_id,
+            source_type=source_type_enum,
+            embedding_provider=HashingEmbeddingProvider(),
+        )
+        if not documents:
+            typer.echo(f"No supported files found in {directory} (looked for .pdf/.docx/.pptx/.txt/.md).")
+            engine.dispose()
+            return
+
+        typer.echo(f"Ingested {len(documents)} document(s):")
+        for document in documents:
+            typer.echo(f"  - '{document.title}' (id {document.id})")
+
+        if extract_facts:
+            from asos.documents.extraction import ExtractionError
+            from asos.llm.anthropic_client import AnthropicClaudeClient, ClaudeAPIError
+
+            client = AnthropicClaudeClient(api_key=api_key)
+            for document in documents:
+                chunks = (
+                    session.query(DocumentChunk)
+                    .filter_by(document_id=document.id)
+                    .order_by(DocumentChunk.chunk_index)
+                    .all()
+                )
+                full_text = "\n\n".join(c.content for c in chunks)
+                try:
+                    from asos.documents.extraction import extract_syllabus_facts
+
+                    facts = extract_syllabus_facts(
+                        session, course_id=document.course_id, document_id=document.id,
+                        syllabus_text=full_text, claude_client=client,
+                    )
+                    typer.echo(f"  '{document.title}': extracted {len(facts)} fact(s)")
+                except (ClaudeAPIError, ExtractionError) as exc:
+                    typer.echo(f"  '{document.title}': extraction failed ({exc})")
+    engine.dispose()
+
+
 @docs_app.command("search")
 def docs_search(
     query: str = typer.Argument(...),

@@ -3,7 +3,7 @@ from __future__ import annotations
 from asos.db.enums import DocumentSourceType
 from asos.db.models import Course, DocumentChunk
 from asos.documents.embeddings import HashingEmbeddingProvider
-from asos.documents.ingestion import ingest_document
+from asos.documents.ingestion import ingest_document, ingest_folder
 from asos.documents.retrieval import search_chunks
 
 
@@ -179,3 +179,41 @@ def test_search_restricted_to_specific_document_ids(session, tmp_path):
 
     empty_results = search_chunks(session, query="buffers", embedding_provider=provider, document_ids=[])
     assert empty_results == []
+
+
+def test_ingest_folder_ingests_every_supported_file(session, tmp_path):
+    (tmp_path / "syllabus1.txt").write_text("Exam 1 covers chapters 1-3.")
+    (tmp_path / "syllabus2.txt").write_text("Exam 2 covers chapters 4-6.")
+    (tmp_path / "notes.md").write_text("# Extra notes\nSome content.")
+    (tmp_path / "ignore.zip").write_bytes(b"not a real zip, just testing extension filtering")
+
+    provider = HashingEmbeddingProvider(dimensions=64)
+    documents = ingest_folder(
+        session, folder_path=tmp_path, course_id=None, source_type=DocumentSourceType.SYLLABUS, embedding_provider=provider
+    )
+
+    assert len(documents) == 3  # the two .txt files and the .md file, not the .zip
+    titles = {d.title for d in documents}
+    assert titles == {"syllabus1", "syllabus2", "notes"}
+
+
+def test_ingest_folder_skips_subdirectories(session, tmp_path):
+    (tmp_path / "top_level.txt").write_text("Top level content.")
+    subdir = tmp_path / "subdir"
+    subdir.mkdir()
+    (subdir / "nested.txt").write_text("Nested content that should be skipped.")
+
+    provider = HashingEmbeddingProvider(dimensions=64)
+    documents = ingest_folder(
+        session, folder_path=tmp_path, course_id=None, source_type=DocumentSourceType.NOTES, embedding_provider=provider
+    )
+    assert len(documents) == 1
+    assert documents[0].title == "top_level"
+
+
+def test_ingest_folder_empty_directory_returns_empty_list(session, tmp_path):
+    provider = HashingEmbeddingProvider(dimensions=32)
+    documents = ingest_folder(
+        session, folder_path=tmp_path, course_id=None, source_type=DocumentSourceType.OTHER, embedding_provider=provider
+    )
+    assert documents == []
