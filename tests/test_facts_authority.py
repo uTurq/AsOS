@@ -7,6 +7,7 @@ from asos.db.models import Course, Fact
 from asos.facts.authority import (
     find_all_conflicts,
     get_current_facts,
+    list_current_facts,
     record_fact,
     resolve_conflict_with_user_statement,
     resolve_fact,
@@ -233,3 +234,51 @@ def test_unseeded_source_raises_clear_error(session):
             source_type=SourceType.SYLLABUS,
             explicitness=FactExplicitness.EXPLICIT_STATEMENT,
         )
+
+
+def test_list_current_facts_returns_everything_regardless_of_conflict(session):
+    seed_default_sources(session)
+    course = _course(session)
+
+    record_fact(
+        session, course_id=course.id, subject="Late policy", value="10% per day",
+        source_type=SourceType.SYLLABUS, explicitness=FactExplicitness.EXPLICIT_STATEMENT,
+    )
+    record_fact(
+        session, course_id=course.id, subject="Grading breakdown", value="Exams 60%, HW 40%",
+        source_type=SourceType.SYLLABUS, explicitness=FactExplicitness.EXPLICIT_STATEMENT,
+    )
+
+    facts = list_current_facts(session, course_id=course.id)
+    assert {f.subject for f in facts} == {"Late policy", "Grading breakdown"}
+
+
+def test_list_current_facts_excludes_superseded(session):
+    seed_default_sources(session)
+    course = _course(session)
+    record_fact(
+        session, course_id=course.id, subject="Exam 1 date", value="2026-10-14",
+        source_type=SourceType.SYLLABUS, explicitness=FactExplicitness.EXPLICIT_STATEMENT,
+    )
+    resolve_conflict_with_user_statement(session, course_id=course.id, subject="Exam 1 date", value="2026-10-16")
+
+    facts = list_current_facts(session, course_id=course.id)
+    assert len(facts) == 1
+    assert facts[0].value == "2026-10-16"
+
+
+def test_list_current_facts_filters_by_document_id(session):
+    seed_default_sources(session)
+    course = _course(session)
+    record_fact(
+        session, course_id=course.id, subject="Late policy", value="10% per day",
+        source_type=SourceType.SYLLABUS, explicitness=FactExplicitness.EXPLICIT_STATEMENT, document_id=42,
+    )
+    record_fact(
+        session, course_id=course.id, subject="Grading breakdown", value="Exams 60%",
+        source_type=SourceType.SYLLABUS, explicitness=FactExplicitness.EXPLICIT_STATEMENT, document_id=99,
+    )
+
+    facts = list_current_facts(session, document_id=42)
+    assert len(facts) == 1
+    assert facts[0].subject == "Late policy"

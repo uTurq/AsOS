@@ -334,7 +334,22 @@ manual check the user has confirmed.
 
 ## 8. Implementation progress
 
-### Done (this session — batch document ingestion + first live syllabus extraction result)
+### Done (this session — asos facts list, prompted by a real usability gap)
+- **Real gap found by actual use**: the user ran `docs ingest-folder
+  --extract-facts` on two real syllabi and got back only fact *counts*
+  ("extracted 1 fact(s)", "extracted 3 fact(s)") with no way to see
+  what those facts actually were — there was no command to list facts
+  outside of `facts conflicts`, which only shows contested ones.
+- `asos/facts/authority.py`: `list_current_facts()` — the plain "what
+  does AsOS currently know" view, optionally filtered by course or by
+  the specific document facts were extracted from. Correctly excludes
+  superseded facts (consistent with `get_current_facts`) and returns
+  everything else regardless of conflict status.
+- `asos facts list [--course-id] [--document-id]` CLI command.
+- 185 automated tests passing (was 181 after the batch-ingestion
+  milestone).
+
+### Done (previous session — batch document ingestion + first live syllabus extraction result)
 - **First live, real-content confirmation of the syllabus-extraction
   pipeline**: the user ingested a real syllabus and ran
   `asos docs extract-facts` for real. It correctly extracted 7 facts —

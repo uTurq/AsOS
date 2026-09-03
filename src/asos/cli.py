@@ -220,6 +220,27 @@ def facts_conflicts(course_id: int = typer.Option(None, help="Limit to one cours
     engine.dispose()
 
 
+@facts_app.command("list")
+def facts_list(
+    course_id: int = typer.Option(None, help="Limit to one course's DB id."),
+    document_id: int = typer.Option(None, help="Limit to facts extracted from one document."),
+) -> None:
+    """List every current fact AsOS knows — the plain 'what does it
+    actually know' view, regardless of whether anything's in conflict."""
+    from asos.db.base import make_engine, make_session_factory
+    from asos.facts.authority import list_current_facts
+
+    engine = make_engine(get_database_url())
+    with make_session_factory(engine)() as session:
+        facts = list_current_facts(session, course_id=course_id, document_id=document_id)
+        if not facts:
+            typer.echo("No facts recorded yet.")
+            return
+        for fact in facts:
+            typer.echo(f"{fact.subject}: {fact.value}  [source={fact.source.type.value}, document_id={fact.document_id}]")
+    engine.dispose()
+
+
 @facts_app.command("resolve")
 def facts_resolve(
     subject: str = typer.Argument(..., help="Exact subject text, as shown by `asos facts conflicts`."),

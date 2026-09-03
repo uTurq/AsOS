@@ -220,6 +220,21 @@ def find_all_conflicts(session: Session, *, course_id: int | None = None) -> lis
     return conflicts
 
 
+def list_current_facts(
+    session: Session, *, course_id: int | None = None, document_id: int | None = None
+) -> list[Fact]:
+    """All current (non-superseded) facts, optionally filtered by
+    course or by the document they were extracted from. Unlike
+    find_all_conflicts, this returns every fact regardless of whether
+    it's contested — the plain "what does AsOS currently know" view."""
+    stmt = select(Fact).where(Fact.superseded_by_fact_id.is_(None))
+    if course_id is not None:
+        stmt = stmt.where(Fact.course_id == course_id)
+    if document_id is not None:
+        stmt = stmt.where(Fact.document_id == document_id)
+    return list(session.execute(stmt.order_by(Fact.subject)).scalars().all())
+
+
 def resolve_conflict_with_user_statement(
     session: Session, *, course_id: int | None, subject: str, value: str
 ) -> Fact:

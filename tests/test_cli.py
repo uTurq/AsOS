@@ -83,6 +83,13 @@ def test_facts_conflicts_empty_by_default(isolated_data_dir):
     assert "No unresolved fact conflicts" in result.stdout
 
 
+def test_facts_list_empty_by_default(isolated_data_dir):
+    runner.invoke(app, ["init-db"])
+    result = runner.invoke(app, ["facts", "list"])
+    assert result.exit_code == 0
+    assert "No facts recorded yet" in result.stdout
+
+
 def test_facts_resolve_and_recheck_conflicts(isolated_data_dir):
     runner.invoke(app, ["init-db"])
 
