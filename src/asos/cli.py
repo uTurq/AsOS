@@ -20,6 +20,7 @@ from asos.credentials import (
     CANVAS_BASE_URL,
     CredentialNotFoundError,
     CredentialVault,
+    ICS_FEED_URL,
     KNOWN_CREDENTIAL_NAMES,
 )
 from asos.logging_setup import configure_logging
@@ -29,6 +30,7 @@ from asos.service.health import is_healthy
 app = typer.Typer(help="AsOS — Assist Operating System")
 creds_app = typer.Typer(help="Manage locally-stored credentials (Canvas token, Anthropic API key, ...).")
 canvas_app = typer.Typer(help="Canvas sync commands.")
+calendar_app = typer.Typer(help="Calendar feed sync (ICS) — fallback when a Canvas API token isn't available.")
 facts_app = typer.Typer(help="Query and resolve fact conflicts.")
 docs_app = typer.Typer(help="Document ingestion (syllabi, lecture notes, study guides) and search.")
 study_app = typer.Typer(help="Concepts, mastery, assessments, and preparedness.")
@@ -36,6 +38,7 @@ task_app = typer.Typer(help="Local task tracking, independent of Canvas submissi
 notify_app = typer.Typer(help="Notification scanning and delivery.")
 app.add_typer(creds_app, name="creds")
 app.add_typer(canvas_app, name="canvas")
+app.add_typer(calendar_app, name="calendar")
 app.add_typer(facts_app, name="facts")
 app.add_typer(docs_app, name="docs")
 app.add_typer(study_app, name="study")
@@ -657,6 +660,41 @@ def brief() -> None:
             typer.echo(f"Couldn't reach Claude: {exc}")
             raise typer.Exit(1)
         typer.echo(response)
+    engine.dispose()
+
+
+@calendar_app.command("sync")
+def calendar_sync(course_id: int = typer.Option(None, help="Associate synced events with this course.")) -> None:
+    """Sync events from your Canvas calendar feed (ICS) — fallback for
+    when a Canvas API token isn't available. Gets due dates and
+    scheduled events; does NOT get grades or submission status (that
+    needs the real API — see `asos canvas sync`)."""
+    from asos.calendar_feed.sync import ICSFetchError, fetch_ics, sync_ics_text
+    from asos.db.base import make_engine, make_session_factory
+
+    vault = _friendly_vault_or_exit()
+    feed_url = vault.get_credential_or_none(ICS_FEED_URL)
+    if not feed_url:
+        typer.echo(
+            "ics_feed_url is not set. Find it on Canvas's Calendar page "
+            "('Calendar Feed' link) or a course's Syllabus page, then run:\n"
+            f"  asos creds set {ICS_FEED_URL}"
+        )
+        raise typer.Exit(1)
+
+    try:
+        ics_text = fetch_ics(feed_url)
+    except ICSFetchError as exc:
+        typer.echo(f"Couldn't fetch the calendar feed: {exc}")
+        raise typer.Exit(1)
+
+    engine = make_engine(get_database_url())
+    with make_session_factory(engine)() as session:
+        summary = sync_ics_text(session, ics_text, course_id=course_id)
+        typer.echo(
+            f"Saw {summary['events_seen']} event(s): {summary['created']} new, "
+            f"{summary['changes_detected']} change(s) detected total."
+        )
     engine.dispose()
 
 

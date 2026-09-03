@@ -36,9 +36,10 @@ logger = logging.getLogger(__name__)
 CANVAS_API_TOKEN = "canvas_api_token"
 CANVAS_BASE_URL = "canvas_base_url"
 ANTHROPIC_API_KEY = "anthropic_api_key"
+ICS_FEED_URL = "ics_feed_url"
 
 KNOWN_CREDENTIAL_NAMES = frozenset(
-    {CANVAS_API_TOKEN, CANVAS_BASE_URL, ANTHROPIC_API_KEY}
+    {CANVAS_API_TOKEN, CANVAS_BASE_URL, ANTHROPIC_API_KEY, ICS_FEED_URL}
 )
 
 

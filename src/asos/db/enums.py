@@ -99,6 +99,12 @@ class NotificationSeverity(str, enum.Enum):
     AMBIENT = "ambient"
 
 
+class CalendarEventSource(str, enum.Enum):
+    CANVAS = "canvas"
+    ICS_FEED = "ics_feed"
+    MANUAL = "manual"
+
+
 class SyncEntityType(str, enum.Enum):
     COURSE = "course"
     ASSIGNMENT = "assignment"

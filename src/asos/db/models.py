@@ -36,6 +36,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from asos.db.base import Base, _now
 from asos.db.enums import (
     AssessmentType,
+    CalendarEventSource,
     CalendarEventType,
     DocumentSourceType,
     FactConfidence,
@@ -110,7 +111,12 @@ class CalendarEvent(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     course_id: Mapped[int | None] = mapped_column(ForeignKey("courses.id"), nullable=True)
-    canvas_event_id: Mapped[str | None] = mapped_column(String, unique=True, nullable=True)
+    source: Mapped[CalendarEventSource] = _enum_column(
+        CalendarEventSource, nullable=False, default=CalendarEventSource.MANUAL
+    )
+    external_event_id: Mapped[str | None] = mapped_column(
+        String, unique=True, nullable=True, comment="Canvas event id, ICS UID, etc. — unique within its source."
+    )
     title: Mapped[str] = mapped_column(String, nullable=False)
     event_type: Mapped[CalendarEventType] = _enum_column(CalendarEventType, nullable=False)
     start_at: Mapped[datetime.datetime] = mapped_column(DateTime(), nullable=False)
@@ -404,7 +410,9 @@ class SyncChangeLogEntry(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     entity_type: Mapped[SyncEntityType] = _enum_column(SyncEntityType, nullable=False)
     entity_id: Mapped[int] = mapped_column(nullable=False, comment="Local DB id of the affected row.")
-    canvas_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    external_id: Mapped[str | None] = mapped_column(
+        String, nullable=True, comment="External id from whichever source produced this change (Canvas id, ICS UID, etc.)."
+    )
     change_type: Mapped[SyncChangeType] = _enum_column(SyncChangeType, nullable=False)
     field_name: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="Null when change_type is created/deleted (whole-entity change)."

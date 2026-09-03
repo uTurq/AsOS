@@ -46,6 +46,12 @@ def test_canvas_sync_without_credentials_fails_clearly(isolated_data_dir):
     assert "not fully set" in result.stdout
 
 
+def test_calendar_sync_without_credentials_fails_clearly(isolated_data_dir):
+    result = runner.invoke(app, ["calendar", "sync"])
+    assert result.exit_code == 1
+    assert "ics_feed_url is not set" in result.stdout
+
+
 def test_facts_conflicts_empty_by_default(isolated_data_dir):
     runner.invoke(app, ["init-db"])
     result = runner.invoke(app, ["facts", "conflicts"])

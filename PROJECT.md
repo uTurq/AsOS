@@ -133,7 +133,14 @@ Core Service (asos.service.core.CoreService)
   - Canvas sync worker                              [implemented as a standalone module + CLI command;
                                                        NOT yet wired into CoreService's own loop for
                                                        periodic/automatic polling — currently a manual
-                                                       `asos canvas sync` invocation only]
+                                                       `asos canvas sync` invocation only. BLOCKED on the
+                                                       user's institution for live verification — see
+                                                       "Explicitly not started yet"]
+  - ICS calendar-feed fallback (asos.calendar_feed.*) [implemented + CLI (`asos calendar sync`); the
+                                                       real-world workaround for when Canvas API tokens
+                                                       are institutionally disabled. Confirmed working
+                                                       end-to-end against a synthetic feed; not yet
+                                                       tried against the user's real school feed URL]
   - Content ingestion pipeline                      [implemented as standalone modules
                                                        (asos.documents.*) + CLI commands
                                                        (`asos docs ingest`/`search`/`extract-facts`);
@@ -327,7 +334,50 @@ manual check the user has confirmed.
 
 ## 8. Implementation progress
 
-### Done (this session — core assistant milestone: text/CLI interface wiring Claude into everything)
+### Done (this session — ICS calendar-feed fallback, prompted by a real-world blocker)
+- **Real-world context**: the user's Canvas administrator disabled
+  self-service API token generation entirely (institution policy).
+  Rather than block on IT approving a token, built a genuine fallback:
+  most Canvas instances still expose a private per-user ICS calendar
+  feed URL (Calendar page -> "Calendar Feed") that works with no token.
+  This gets due dates and scheduled events; it does NOT get grades or
+  submission status — a real, disclosed limitation, not a full
+  Canvas-API replacement.
+- **Two schema fixes made along the way**, both because "Canvas" had
+  been baked into field names that needed to become source-agnostic
+  once a second calendar source existed:
+  - `calendar_events.canvas_event_id` -> `external_event_id`, plus a
+    new `source` enum column (canvas/ics_feed/manual).
+  - `sync_change_log.canvas_id` -> `external_id` (it's a shared audit
+    column across course/assignment/calendar_event changes, not
+    Canvas-specific).
+  Both were written as true renames (SQLite batch-mode
+  `alter_column`/backfill), NOT autogenerate's default drop-and-add —
+  each was verified by seeding real data, running the migration, and
+  confirming the data survived the upgrade AND a downgrade back.
+- `asos/calendar_feed/parsing.py`: `parse_ics()` — normalizes ICS
+  events (including all-day dates and timezone-aware datetimes) to
+  naive UTC per the existing project-wide convention. A fixture bug
+  was caught and fixed during testing: a synthetic fixed-offset
+  timezone doesn't round-trip through real ICS serialization the way
+  an actual IANA timezone does (which is what real Canvas feeds
+  always use) — the test was rewritten to use `zoneinfo.ZoneInfo`
+  instead of a bug in the parser itself.
+- `asos/calendar_feed/sync.py`: `fetch_ics()` (injectable HTTP
+  session, same DI pattern as Canvas) + `sync_ics_text()`, reusing the
+  same `sync_change_log` diff/audit trail Canvas sync already writes
+  to — this is just a second writer into the same `calendar_events`
+  table, not a parallel system.
+- `asos creds set ics_feed_url` + `asos calendar sync` CLI commands.
+- **Verified genuinely end-to-end, not just against fakes**: served a
+  real ICS file over a real local HTTP server, pointed the real CLI
+  at it, and confirmed events were correctly fetched, parsed, and
+  stored — then ran the sync again and confirmed zero spurious changes
+  were detected (real idempotency, not asserted idempotency).
+- 165 automated tests passing (was 153 after the core assistant
+  milestone).
+
+### Done (previous session — core assistant milestone: text/CLI interface wiring Claude into everything)
 - **Small refactor first**: moved the `ClaudeClient` protocol and the
   real `AnthropicClaudeClient` implementation out of
   `asos.documents.*` into a shared `asos/llm/` package
@@ -618,20 +668,30 @@ manual check the user has confirmed.
   placeholder exists (see above) — real semantic retrieval quality
   needs a real local model, chosen and latency-tested on the actual
   Windows CPU-only machine, not assumed here.
-- **Live Claude API verification.** `AnthropicClaudeClient` exists and
-  matches the documented API shape, and is now exercised by two
-  independent callers (syllabus extraction and the core assistant) —
-  but neither has ever made a real network call. Needs the user's own
-  `anthropic_api_key` and awareness it's billed.
-- **Live Canvas verification** (carried over from the Canvas sync
-  milestone — still true). This sandbox's network egress is restricted
-  to package registries (PyPI, npm, GitHub, etc.) and cannot reach any
-  Canvas instance. `CanvasClient`/`CanvasSyncWorker` are thoroughly
-  unit-tested against realistic mocked Canvas API responses, but a real
-  end-to-end sync against an actual Canvas account has NOT been
-  verified and needs to happen on the user's own machine with real
-  credentials (`asos creds set canvas_base_url` / `asos creds set
-  canvas_api_token`, then `asos canvas sync`).
+- **Live Claude API — CONFIRMED WORKING.** The user set a real
+  `anthropic_api_key` and ran `asos ask "what should I do right now?"`
+  on their real Windows machine: it returned a real, live Claude
+  response. It gave generic advice rather than anything schedule-
+  specific — correct behavior, not a bug, since no Canvas/ICS data had
+  been synced into the DB yet at that point. This closes out the "live
+  Claude API" gap that every prior session could only verify against
+  fakes.
+- **Live Canvas API — BLOCKED, not just unverified.** The user's
+  institution disables self-service Canvas API token generation
+  entirely (confirmed via a real screenshot: "Your Canvas
+  administrators have chosen to limit your ability to generate your
+  own access token"). An email to IT requesting one is pending as of
+  this writing. `CanvasClient`/`CanvasSyncWorker` remain fully built
+  and unit-tested against realistic mocked responses, but live
+  verification depends on IT's response, not just on the user running
+  a command. **The ICS calendar-feed fallback (this session) exists
+  specifically to make progress possible without waiting on that.**
+- **Live ICS calendar feed — CONFIRMED WORKING**, but only against a
+  synthetic feed. Verified end-to-end by this session (a real local
+  HTTP server serving a real ICS file, fetched and synced by the real
+  CLI, idempotency confirmed on a second run) — but never yet against
+  the user's actual school Canvas ICS feed URL, since obtaining that
+  URL is the user's next step.
 - Deleted/withdrawn Canvas entities are logged for visibility but not
   pruned locally — see the decision table for reasoning; revisit if
   this proves wrong in practice.
@@ -719,6 +779,8 @@ manual check the user has confirmed.
 | Context assembly (`asos.core.context`) is entirely separate from and precedes any Claude call | Direct implementation of architectural principle 1: local code does all retrieval, Claude only synthesizes. Keeping this as its own module with zero Claude dependency means the "what does AsOS currently know" question is testable (and debuggable) without ever touching an API key, and means Claude's context is always something a person could point to in the database — never something Claude reached for on its own. |
 | `ClaudeClient` protocol and `AnthropicClaudeClient` moved into a shared `asos/llm/` package rather than staying under `asos/documents/` | Claude is now called from two independent places (syllabus extraction and the core assistant), and a third (voice) is coming. Keeping the shared interface under a feature-specific package would have made the next caller either duplicate the protocol or import from an unrelated feature's namespace. Moved once, at the point a second real caller appeared — not preemptively before there was a second user of it. |
 | Every Claude prompt in the core assistant explicitly instructs "never invent... say plainly you don't have that information" | Direct implementation of acceptance criterion 16 ("no hallucinated content"). This is stated as an instruction in the prompt, not enforced in code, because it can't be — verifying it holds in practice requires a real model call this sandbox can't make; the test suite verifies the instruction is present and that real context reaches the prompt, not that Claude obeys it. |
+| ICS calendar feed built as a genuine fallback, not a stopgap to delete later | A real institutional constraint (admin-disabled token self-service) is common enough across schools that this is worth keeping permanently, not just unblocking this one user — `CalendarEvent.source` distinguishes canvas/ics_feed/manual precisely so both paths can coexist (e.g. ICS for schedule, manually-entered facts for grades) rather than one being deleted once a token eventually arrives. |
+| Renamed `canvas_event_id`/`canvas_id` to `external_event_id`/`external_id` via true migrations, not left as-is | Once a second calendar source existed, keeping Canvas-specific names on shared columns would have meant either lying in the schema (an ICS UID stored in a column literally named `canvas_event_id`) or duplicating columns per source. Fixed at the point a second real user of the column appeared — not renamed preemptively, not left wrong indefinitely. Both migrations were hand-corrected from Alembic's default drop-and-add autogenerate output specifically to avoid silently discarding any Canvas sync history a user might already have. |
 
 ---
 

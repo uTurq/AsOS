@@ -30,7 +30,7 @@ from sqlalchemy.orm import Session
 
 from asos.canvas.client import CanvasClient
 from asos.db.base import _now
-from asos.db.enums import CalendarEventType, SyncChangeType, SyncEntityType
+from asos.db.enums import CalendarEventSource, CalendarEventType, SyncChangeType, SyncEntityType
 from asos.db.models import Assignment, CalendarEvent, Course, SyncChangeLogEntry
 
 logger = logging.getLogger("asos.canvas.sync")
@@ -71,7 +71,7 @@ def _log_change(
         SyncChangeLogEntry(
             entity_type=entity_type,
             entity_id=entity_id,
-            canvas_id=canvas_id,
+            external_id=canvas_id,
             change_type=change_type,
             field_name=field_name,
             old_value=old_value,
@@ -228,13 +228,14 @@ class CanvasSyncWorker:
             }
 
             existing = session.execute(
-                select(CalendarEvent).where(CalendarEvent.canvas_event_id == canvas_id)
+                select(CalendarEvent).where(CalendarEvent.external_event_id == canvas_id)
             ).scalar_one_or_none()
 
             if existing is None:
                 event = CalendarEvent(
                     course_id=course.id if course else None,
-                    canvas_event_id=canvas_id,
+                    source=CalendarEventSource.CANVAS,
+                    external_event_id=canvas_id,
                     event_type=CalendarEventType.CLASS,
                     **new_values,
                 )
