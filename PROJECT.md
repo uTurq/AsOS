@@ -334,7 +334,67 @@ manual check the user has confirmed.
 
 ## 8. Implementation progress
 
-### Done (this session — ICS calendar-feed fallback, prompted by a real-world blocker)
+### Done (this session — real-world Canvas verification results + periodic job scheduler)
+- **Real-world outcome, recorded for the historical record**: the
+  user's institution formally denied Canvas API token generation
+  ("This is not something we allow, due to security concerns"). The
+  ICS calendar feed (built last session anticipating exactly this) was
+  tried instead and **works** — confirmed live: `asos calendar sync`
+  against the user's real Canvas account pulled in 327 real events.
+  `asos brief` was also confirmed live against real synced data for
+  the first time — Claude correctly reasoned about real course names
+  and even correctly inferred, unprompted, that midnight-timestamped
+  items were likely housekeeping/syllabus checkpoints rather than
+  timed commitments (a genuinely good piece of grounded reasoning,
+  not something instructed for).
+- **A real ethical judgment call, worth recording precisely**: the
+  user proposed adding browser automation of their own Canvas session
+  as a third data source. This was initially declined — not because
+  scraping is technically hard, but because IT's stated concern
+  ("we do not allow anyone to generate their own API tokens... due to
+  security concerns") was reasonably read as being about automated
+  programmatic access to the data generally, not narrowly about the
+  literal token mechanism, and building a workaround to an explicit
+  institutional "no" wasn't something to help architect. The user went
+  back to IT and asked specifically about this approach; IT
+  explicitly approved it ("Since it is using your own system access
+  and not API integration from a third party, there is no security
+  concern"). That explicit, specific authorization is what changed the
+  answer — the same request would still be declined without it. This
+  is exactly the intended resolution path or a values disagreement:
+  raise the concern, let the person go back to the actual authority,
+  proceed once genuinely authorized.
+- `CoreService` gained a real, generic, tested job scheduler
+  (`register_job`/`run_due_jobs`) — interval-based, per-job failure
+  isolation (one job's exception never crashes the service or blocks
+  others), and per-job backoff (a persistently failing job retries
+  once per interval, not once per heartbeat tick). This closes a gap
+  flagged as open since the Canvas sync milestone ("NOT yet wired into
+  CoreService's own loop for periodic polling").
+- `asos/service/jobs.py`: `register_default_jobs()` — decides which
+  jobs actually make sense to run based on which credentials exist
+  (Canvas sync only if both `canvas_base_url` and `canvas_api_token`
+  are set; ICS sync only if `ics_feed_url` is set; notification
+  scanning always). Kept deliberately separate from `CoreService`
+  itself so the scheduler stays credential/network-free and testable
+  in complete isolation — verified with 5 tests covering every
+  combination of configured/unconfigured credentials.
+- `asos run` now calls `register_default_jobs()`, so the background
+  service is no longer heartbeat-only — it actually does the periodic
+  work the whole system was designed around.
+- Added `Assignment.description` / `.score` / `.grade` columns
+  (nullable, additive-only migration) — the landing spot for whatever
+  the upcoming browser-automation work extracts (assignment
+  instructions and grades), decided before writing any scraping code.
+- **Verified the full scheduler pipeline end-to-end for real**: set a
+  real ICS credential, constructed a real `CoreService`, called
+  `register_default_jobs()`, ran a single `run_one_tick()` — the exact
+  method the real background loop calls every heartbeat — and
+  confirmed real events landed in the database. This is what will
+  happen automatically, unattended, once `asos run` is left running.
+- 175 automated tests passing (was 165 after the ICS milestone).
+
+### Done (previous session — ICS calendar-feed fallback, prompted by a real-world blocker)
 - **Real-world context**: the user's Canvas administrator disabled
   self-service API token generation entirely (institution policy).
   Rather than block on IT approving a token, built a genuine fallback:
@@ -664,6 +724,21 @@ manual check the user has confirmed.
   service lifecycle, and CLI smoke tests.
 
 ### Explicitly not started yet
+- **Browser automation (Canvas assignment descriptions + grades) —
+  ACTIVE NEXT MILESTONE**, explicitly authorized by the user's
+  institution for this specific approach (see decision log). Plan
+  locked: a dedicated, separate browser profile the user logs into
+  manually once (never the daily-use profile, never a stored
+  password — session-cookie reuse only), scraping assignment
+  instructions into `Assignment.description` and
+  grades/scores into `Assignment.score`/`.grade`, running on the new
+  scheduler. Split into two layers for testability: navigation
+  (Playwright-driven, genuinely untestable from this sandbox — no
+  browser, no real Canvas login) and parsing (pure functions over raw
+  HTML, testable with realistic fixtures same as everything else).
+  This will need substantially more real-machine iteration than any
+  prior integration, since Canvas's actual page structure can only be
+  verified against the user's real account.
 - **Real embedding model.** Only the `HashingEmbeddingProvider`
   placeholder exists (see above) — real semantic retrieval quality
   needs a real local model, chosen and latency-tested on the actual
@@ -780,6 +855,9 @@ manual check the user has confirmed.
 | `ClaudeClient` protocol and `AnthropicClaudeClient` moved into a shared `asos/llm/` package rather than staying under `asos/documents/` | Claude is now called from two independent places (syllabus extraction and the core assistant), and a third (voice) is coming. Keeping the shared interface under a feature-specific package would have made the next caller either duplicate the protocol or import from an unrelated feature's namespace. Moved once, at the point a second real caller appeared — not preemptively before there was a second user of it. |
 | Every Claude prompt in the core assistant explicitly instructs "never invent... say plainly you don't have that information" | Direct implementation of acceptance criterion 16 ("no hallucinated content"). This is stated as an instruction in the prompt, not enforced in code, because it can't be — verifying it holds in practice requires a real model call this sandbox can't make; the test suite verifies the instruction is present and that real context reaches the prompt, not that Claude obeys it. |
 | ICS calendar feed built as a genuine fallback, not a stopgap to delete later | A real institutional constraint (admin-disabled token self-service) is common enough across schools that this is worth keeping permanently, not just unblocking this one user — `CalendarEvent.source` distinguishes canvas/ics_feed/manual precisely so both paths can coexist (e.g. ICS for schedule, manually-entered facts for grades) rather than one being deleted once a token eventually arrives. |
+| Browser automation for Canvas: dedicated separate browser profile with one-time manual login, never a stored password | Session-cookie reuse is a meaningfully smaller security surface than automated login (no password storage, no MFA-handling fragility, nothing for AsOS to mishandle). Using a profile separate from the user's daily browser keeps the automation's persistent login state isolated from everything else they browse. This was decided rather than offered as a choice — storing a password for automated use isn't a close call given the project's existing stance that credentials never get typed or stored outside the OS-native vault, and a login form is exactly that. |
+| Job scheduler built as a generic interval-runner in `CoreService`, with the "which jobs exist" decision kept in a separate `asos.service.jobs` module | Mirrors every other split in this codebase between mechanism and judgment (parsing vs. chunking, classification vs. delivery): `CoreService` needs zero credential or network awareness to be fully tested, and the actual "given what's configured, what should run" logic lives in exactly one place rather than being smeared across the scheduler's internals. |
+| Scheduler jobs fail in isolation and back off by their own interval, not per-tick | A single broken credential (e.g. an expired Canvas token) must not crash the whole background service or spam retries every heartbeat forever — both were directly tested (a failing job doesn't block a working one; a persistently failing job only retries once per interval). This matters more here than anywhere else in the project so far, since this is the first genuinely long-running, unattended code path. |
 | Renamed `canvas_event_id`/`canvas_id` to `external_event_id`/`external_id` via true migrations, not left as-is | Once a second calendar source existed, keeping Canvas-specific names on shared columns would have meant either lying in the schema (an ICS UID stored in a column literally named `canvas_event_id`) or duplicating columns per source. Fixed at the point a second real user of the column appeared — not renamed preemptively, not left wrong indefinitely. Both migrations were hand-corrected from Alembic's default drop-and-add autogenerate output specifically to avoid silently discarding any Canvas sync history a user might already have. |
 
 ---

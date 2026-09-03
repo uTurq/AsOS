@@ -79,9 +79,14 @@ def init_db() -> None:
 
 @app.command()
 def run() -> None:
-    """Run the AsOS core service in the foreground (Ctrl+C to stop)."""
+    """Run the AsOS core service in the foreground (Ctrl+C to stop).
+    Automatically syncs Canvas/ICS/notifications on a schedule,
+    whichever credentials are set."""
+    from asos.service.jobs import register_default_jobs
+
     configure_logging()
     service = CoreService()
+    register_default_jobs(service)
 
     def _handle_signal(signum, frame):
         service.request_stop()

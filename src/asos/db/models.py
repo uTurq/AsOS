@@ -93,10 +93,19 @@ class Assignment(Base, TimestampMixin):
     course_id: Mapped[int] = mapped_column(ForeignKey("courses.id"), nullable=False)
     canvas_assignment_id: Mapped[str | None] = mapped_column(String, unique=True, nullable=True)
     title: Mapped[str] = mapped_column(String, nullable=False)
+    description: Mapped[str | None] = mapped_column(
+        Text, nullable=True, comment="Assignment instructions, from the Canvas REST API or browser scraping."
+    )
     due_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(), nullable=True)
     points_possible: Mapped[float | None] = mapped_column(nullable=True)
     canvas_status: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="Raw Canvas submission status signal, NOT the local task state."
+    )
+    score: Mapped[float | None] = mapped_column(
+        nullable=True, comment="Points earned, where Canvas exposes a numeric score."
+    )
+    grade: Mapped[str | None] = mapped_column(
+        String, nullable=True, comment="Displayed grade as Canvas shows it (letter, percentage, complete/incomplete, etc.) -- not always numeric, so kept separate from `score`."
     )
     canvas_synced_at: Mapped[datetime.datetime | None] = mapped_column(
         DateTime(), nullable=True
